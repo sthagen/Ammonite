@@ -1,9 +1,11 @@
 package ammonite
 
-import ammonite.runtime.APIHolder
+import ammonite.interp.api.APIHolder
 
 trait TestReplApi {
   def message: String
 }
 
 object TestReplBridge extends APIHolder[TestReplApi]
+
+case class Nope(n: Int)

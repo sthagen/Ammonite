@@ -3,62 +3,51 @@ package ammonite.interp
 import java.io.{File, OutputStream, PrintStream}
 import java.util.regex.Pattern
 
-import ammonite.interp.CodeWrapper
+import ammonite.compiler.iface.{
+  CodeWrapper,
+  CompilerBuilder,
+  CompilerLifecycleManager,
+  Parser,
+  Preprocessor
+}
+import ammonite.interp.api.{InterpAPI, InterpLoad, LoadJar}
 
 import scala.collection.mutable
-
 import ammonite.runtime._
-import fastparse._
 
 import annotation.tailrec
 import ammonite.runtime.tools.IvyThing
-import ammonite.util.ImportTree
 import ammonite.util.Util._
-import ammonite.util._
-import coursier.util.Task
+import ammonite.util.{Frame => _, _}
+import coursierapi.{Dependency, Fetch, Repository}
 
 /**
  * A convenient bundle of all the functionality necessary
  * to interpret Scala code. Doesn't attempt to provide any
  * real encapsulation for now.
  */
-class Interpreter(val printer: Printer,
+class Interpreter(compilerBuilder: CompilerBuilder,
+                  // by-name, so that fastparse isn't loaded when we don't need it
+                  parser: => Parser,
+                  val printer: Printer,
                   val storage: Storage,
-                  basePredefs: Seq[PredefInfo],
-                  customPredefs: Seq[PredefInfo],
-                  // Allows you to set up additional "bridges" between the REPL
-                  // world and the outside world, by passing in the full name
-                  // of the `APIHolder` object that will hold the bridge and
-                  // the object that will be placed there. Needs to be passed
-                  // in as a callback rather than run manually later as these
-                  // bridges need to be in place *before* the predef starts
-                  // running, so you can use them predef to e.g. configure
-                  // the REPL before it starts
-                  extraBridges: Seq[(String, String, AnyRef)],
                   val wd: os.Path,
                   colors: Ref[Colors],
                   verboseOutput: Boolean = true,
                   getFrame: () => Frame,
                   val createFrame: () => Frame,
+                  initialClassLoader: ClassLoader = null,
                   replCodeWrapper: CodeWrapper,
-                  scriptCodeWrapper: CodeWrapper,
-                  alreadyLoadedDependencies: Seq[coursier.Dependency],
-                  importHooks: Map[Seq[String], ImportHook])
+                  val scriptCodeWrapper: CodeWrapper,
+                  alreadyLoadedDependencies: Seq[Dependency],
+                  importHooks: Map[Seq[String], ImportHook] = ImportHook.defaults,
+                  classPathWhitelist: Set[Seq[String]] = Set.empty)
   extends ImportHook.InterpreterInterface{ interp =>
 
 
   def headFrame = getFrame()
   val repositories = Ref(ammonite.runtime.tools.IvyThing.defaultRepositories)
-  val resolutionHooks = mutable.Buffer.empty[coursier.Fetch[Task] => coursier.Fetch[Task]]
-
-  headFrame.classloader.specialLocalClasses ++= Seq(
-    "ammonite.interp.InterpBridge",
-    "ammonite.interp.InterpBridge$"
-  )
-
-  headFrame.classloader.specialLocalClasses ++= extraBridges
-    .map(_._1)
-    .flatMap(c => Seq(c, c + "$"))
+  val resolutionHooks = mutable.Buffer.empty[Fetch => Fetch]
 
   val mainThread = Thread.currentThread()
 
@@ -71,17 +60,19 @@ class Interpreter(val printer: Printer,
   def dependencyComplete: String => (Int, Seq[String]) =
     IvyThing.completer(repositories(), verbose = verboseOutput)
 
-  val compilerManager = new CompilerLifecycleManager(
-    storage,
+  val compilerManager = compilerBuilder.newManager(
+    storage.dirOpt.map(_.toNIO),
     headFrame,
-    Some(dependencyComplete)
+    Some(dependencyComplete),
+    classPathWhitelist,
+    Option(initialClassLoader).getOrElse(headFrame.classloader)
   )
 
   val eval = Evaluator(headFrame)
 
   private var scriptImportCallback: Imports => Unit = handleImports
 
-  val watchedFiles = mutable.Buffer.empty[(os.Path, Long)]
+  val watchedValues = mutable.Buffer.empty[(Watchable, Long)]
 
   // We keep an *in-memory* cache of scripts, in additional to the global
   // filesystem cache shared between processes. This is because the global
@@ -97,6 +88,13 @@ class Interpreter(val printer: Printer,
 
   def compilationCount = compilerManager.compilationCount
 
+  private val dependencyLoader = new DependencyLoader(
+    printer,
+    storage,
+    alreadyLoadedDependencies,
+    verboseOutput
+  )
+
 
   // Use a var and callbacks instead of a fold, because when running
   // `processModule0` user code may end up calling `processModule` which depends
@@ -106,11 +104,38 @@ class Interpreter(val printer: Printer,
 
   // Needs to be run after the Interpreter has been instantiated, as some of the
   // ReplAPIs available in the predef need access to the Interpreter object
-  def initializePredef(): Option[(Res.Failing, Seq[(os.Path, Long)])] = {
+  def initializePredef(
+    basePredefs: Seq[PredefInfo],
+    customPredefs: Seq[PredefInfo],
+    // Allows you to set up additional "bridges" between the REPL
+    // world and the outside world, by passing in the full name
+    // of the `APIHolder` object that will hold the bridge and
+    // the object that will be placed there. Needs to be passed
+    // in as a callback rather than run manually later as these
+    // bridges need to be in place *before* the predef starts
+    // running, so you can use them predef to e.g. configure
+    // the REPL before it starts
+    extraBridges: Seq[(String, String, AnyRef)],
+    baseImports: Imports = Interpreter.predefImports
+  ): Option[(Res.Failing, Seq[(Watchable, Long)])] = {
+
+    headFrame.classloader.specialLocalClasses ++= Seq(
+      "ammonite.interp.api.InterpBridge",
+      "ammonite.interp.api.InterpBridge$"
+    )
+
+    headFrame.classloader.specialLocalClasses ++= extraBridges
+      .map(_._1)
+      .flatMap(c => Seq(c, c + "$"))
+
+    val bridgeImports = PredefInitialization.initBridges(
+      ("ammonite.interp.api.InterpBridge", "interp", interpApi) +: extraBridges,
+      evalClassloader
+    )
+    predefImports = predefImports ++ bridgeImports ++ baseImports
+
     PredefInitialization.apply(
-      ("ammonite.interp.InterpBridge", "interp", interpApi) +: extraBridges,
       interpApi,
-      evalClassloader,
       storage,
       basePredefs,
       customPredefs,
@@ -124,23 +149,25 @@ class Interpreter(val printer: Printer,
     ) match{
       case Res.Success(_) => None
       case Res.Skip => None
-      case r @ Res.Exception(t, s) => Some((r, watchedFiles.toSeq))
-      case r @ Res.Failure(s) => Some((r, watchedFiles.toSeq))
-      case r @ Res.Exit(_) => Some((r, watchedFiles.toSeq))
+      case r @ Res.Exception(t, s) => Some((r, watchedValues.toSeq))
+      case r @ Res.Failure(s) => Some((r, watchedValues.toSeq))
+      case r @ Res.Exit(_) => Some((r, watchedValues.toSeq))
     }
   }
 
   // The ReplAPI requires some special post-Interpreter-initialization
   // code to run, so let it pass it in a callback and we'll run it here
-  def watch(p: os.Path) = watchedFiles.append(p -> Interpreter.pathSignature(p))
+  def watch(p: os.Path) = watchedValues.append(
+    (Watchable.Path(p), Watchable.pathSignature(p))
+  )
+  def watchValue[T](v: => T) = watchedValues.append((() => v.hashCode, v.hashCode()))
 
   def resolveSingleImportHook(
     source: CodeSource,
     tree: ImportTree,
     wrapperPath: Seq[Name]
   ) = synchronized{
-    val strippedPrefix = tree.prefix.takeWhile(_(0) == '$').map(_.stripPrefix("$"))
-    val hookOpt = importHooks.collectFirst{case (k, v) if strippedPrefix.startsWith(k) => (k, v)}
+    val hookOpt = importHooks.find{case (k, v) => tree.strippedPrefix.startsWith(k)}
     for{
       (hookPrefix, hook) <- Res(hookOpt, s"Import Hook ${tree.prefix} could not be resolved")
       hooked <- Res(
@@ -170,36 +197,20 @@ class Interpreter(val printer: Printer,
           }
         case res: ImportHook.Result.ClassPath =>
 
-          if (res.plugin) headFrame.addPluginClasspath(Seq(res.file.toNIO.toUri.toURL))
-          else headFrame.addClasspath(Seq(res.file.toNIO.toUri.toURL))
+          if (res.plugin) headFrame.addPluginClasspath(res.files.map(_.toNIO.toUri.toURL))
+          else headFrame.addClasspath(res.files.map(_.toNIO.toUri.toURL))
 
           Res.Success(Imports())
+
+        case ImportHook.Result.Repo(repo) =>
+          addRepository(repo)
+          Res.Success(Imports())
+
       }
     } yield hookResults
   }
 
-  def parseImportHooks(source: CodeSource, stmts: Seq[String]) = synchronized{
-    val hookedStmts = mutable.Buffer.empty[String]
-    val importTrees = mutable.Buffer.empty[ImportTree]
-    for(stmt <- stmts) {
-      parse(stmt, Parsers.ImportSplitter(_)) match{
-        case f: Parsed.Failure => hookedStmts.append(stmt)
-        case Parsed.Success(parsedTrees, _) =>
-          var currentStmt = stmt
-          for(importTree <- parsedTrees){
-            if (importTree.prefix(0)(0) == '$') {
-              val length = importTree.end - importTree.start
-              currentStmt = currentStmt.patch(
-                importTree.start, (importTree.prefix(0) + ".$").padTo(length, ' '), length
-              )
-              importTrees.append(importTree)
-            }
-          }
-          hookedStmts.append(currentStmt)
-      }
-    }
-    (hookedStmts.toSeq, importTrees.toSeq)
-  }
+
 
   def resolveImportHooks(importTrees: Seq[ImportTree],
                          hookedStmts: Seq[String],
@@ -233,7 +244,7 @@ class Interpreter(val printer: Printer,
       Seq(Name("ammonite"), Name("$sess")),
       Some(wd/"(console)")
     )
-    val (hookStmts, importTrees) = parseImportHooks(codeSource, stmts)
+    val (hookStmts, importTrees) = parser.parseImportHooks(codeSource, stmts)
 
     for{
       _ <- Catching { case ex => Res.Exception(ex, "") }
@@ -254,10 +265,11 @@ class Interpreter(val printer: Printer,
         prints => s"ammonite.repl.ReplBridge.value.Internal.combinePrints($prints)",
         extraCode = "",
         skipEmpty = true,
+        markScript = false,
         codeWrapper = replCodeWrapper
       )
       (out, tag) <- evaluateLine(
-        processed, printer,
+        processed,
         wrapperName.encoded + ".sc", wrapperName,
         silent,
         incrementLine
@@ -267,17 +279,19 @@ class Interpreter(val printer: Printer,
 
 
   def evaluateLine(processed: Preprocessor.Output,
-                   printer: Printer,
                    fileName: String,
                    indexedWrapperName: Name,
                    silent: Boolean = false,
                    incrementLine: () => Unit): Res[(Evaluated, Tag)] = synchronized{
     for{
       _ <- Catching{ case e: ThreadDeath => Evaluator.interrupted(e) }
-      output <- compilerManager.compileClass(
-        processed,
-        printer,
-        fileName
+      output <- Res(
+        compilerManager.compileClass(
+          processed,
+          printer,
+          fileName
+        ),
+        "Compilation Failed"
       )
       _ = incrementLine()
       res <- eval.processLine(
@@ -290,7 +304,7 @@ class Interpreter(val printer: Printer,
         silent,
         evalClassloader
       )
-    } yield (res, Tag("", ""))
+    } yield (res, Tag("", "", classPathWhitelist.hashCode().toString))
   }
 
 
@@ -304,13 +318,17 @@ class Interpreter(val printer: Printer,
 
     val tag = Tag(
       Interpreter.cacheTag(processed.code.getBytes),
-      Interpreter.cacheTag(evalClassloader.classpathHash(codeSource0.path))
+      Interpreter.cacheTag(evalClassloader.classpathHash(codeSource0.path)),
+      classPathWhitelist.hashCode().toString
     )
 
     for {
       _ <- Catching{case e: Throwable => e.printStackTrace(); throw e}
-      output <- compilerManager.compileClass(
-        processed, printer, codeSource.fileName
+      output <- Res(
+        compilerManager.compileClass(
+          processed, printer, codeSource.fileName
+        ),
+        "Compilation Failed"
       )
       cls <- eval.loadClass(fullyQualifiedName, output.classFiles)
 
@@ -351,25 +369,29 @@ class Interpreter(val printer: Printer,
           Interpreter.cacheTag(
             if (hardcoded) Array.empty[Byte]
             else evalClassloader.classpathHash(codeSource.path)
-          )
+          ),
+          classPathWhitelist.hashCode().toString
         )
 
 
-        val cachedScriptData = storage.classFilesListLoad(codeSource.filePathPrefix, tag)
+        val cachedScriptData = storage.classFilesListLoad(
+          os.sub / codeSource.filePathPrefix,
+          tag
+        )
 
 
         // Lazy, because we may not always need this if the script is already cached
         // and none of it's blocks end up needing to be re-compiled. We don't know up
         // front if any blocks will need re-compilation, because it may import $file
         // another script which gets changed, and we'd only know when we reach that block
-        lazy val splittedScript = Preprocessor.splitScript(
+        lazy val splittedScript = parser.splitScript(
           Interpreter.skipSheBangLine(code),
           codeSource.fileName
         )
 
         for{
           blocks <- cachedScriptData match {
-            case None => splittedScript.map(_.map(_ => None))
+            case None => Res(splittedScript).map(_.map(_ => None))
             case Some(scriptOutput) =>
               Res.Success(
                 scriptOutput.classFiles
@@ -382,7 +404,7 @@ class Interpreter(val printer: Printer,
 
           metadata <- processAllScriptBlocks(
             blocks,
-            splittedScript,
+            Res(splittedScript),
             predefImports,
             codeSource,
             processSingleBlock(_, codeSource, _),
@@ -391,7 +413,7 @@ class Interpreter(val printer: Printer,
           )
         } yield {
           storage.classFilesListSave(
-            codeSource.filePathPrefix,
+            os.sub / codeSource.filePathPrefix,
             metadata.blockInfo,
             tag
           )
@@ -407,7 +429,7 @@ class Interpreter(val printer: Printer,
     val wrapperName = Name("cmd" + currentLine)
     val fileName = wrapperName.encoded + ".sc"
     for {
-      blocks <- Preprocessor.splitScript(Interpreter.skipSheBangLine(code), fileName)
+      blocks <- Res(parser.splitScript(Interpreter.skipSheBangLine(code), fileName))
 
       metadata <- processAllScriptBlocks(
         blocks.map(_ => None),
@@ -420,7 +442,7 @@ class Interpreter(val printer: Printer,
           Some(wd/"(console)")
         ),
         (processed, indexedWrapperName) =>
-          evaluateLine(processed, printer, fileName, indexedWrapperName, false, incrementLine),
+          evaluateLine(processed, fileName, indexedWrapperName, false, incrementLine),
         autoImport = true,
         ""
       )
@@ -509,6 +531,7 @@ class Interpreter(val printer: Printer,
               _ => "scala.Iterator[String]()",
               extraCode = extraCode,
               skipEmpty = false,
+              markScript = false,
               codeWrapper = scriptCodeWrapper
             )
 
@@ -555,7 +578,7 @@ class Interpreter(val printer: Printer,
           for{
             allSplittedChunks <- splittedScript
             (leadingSpaces, stmts) = allSplittedChunks(wrapperIndex - 1)
-            (hookStmts, importTrees) = parseImportHooks(codeSource, stmts)
+            (hookStmts, importTrees) = parser.parseImportHooks(codeSource, stmts)
             hookInfo <- resolveImportHooks(
              importTrees, hookStmts, codeSource, scriptCodeWrapper.wrapperPath
             )
@@ -598,41 +621,17 @@ class Interpreter(val printer: Printer,
     } finally scriptImportCallback = outerScriptImportCallback
   }
 
+  def loadIvy(coordinates: Dependency*) = synchronized {
+    dependencyLoader.load(
+      coordinates,
+      repositories(),
+      resolutionHooks.toSeq
+    )
+  }
 
-  private val alwaysExclude = alreadyLoadedDependencies
-    .map(dep => (dep.module.organization, dep.module.name))
-    .toSet
-
-  def loadIvy(coordinates: coursier.Dependency*) = synchronized{
-    val cacheKey = (interpApi.repositories().hashCode.toString, coordinates)
-
-    storage.ivyCache().get(cacheKey) match{
-      case Some(res) => Right(res.map(new java.io.File(_)))
-      case None =>
-        ammonite.runtime.tools.IvyThing.resolveArtifact(
-          interpApi.repositories(),
-          coordinates
-            .filter(dep => !alwaysExclude((dep.module.organization, dep.module.name)))
-            .map { dep =>
-              dep.copy(
-                exclusions = dep.exclusions ++ alwaysExclude
-              )
-            },
-          verbose = verboseOutput,
-          output = printer.errStream,
-          hooks = resolutionHooks.toSeq
-        )match{
-          case Right((canBeCached, loaded)) =>
-            val loadedSet = loaded.toSet
-            if (canBeCached)
-              storage.ivyCache() = storage.ivyCache().updated(
-                cacheKey, loadedSet.map(_.getAbsolutePath)
-              )
-            Right(loadedSet)
-          case Left(l) =>
-            Left(l)
-        }
-    }
+  private def addRepository(repository: Repository): Unit = synchronized {
+    val current = repositories()
+    repositories.update(current :+ repository)
   }
 
   abstract class DefaultLoadJar extends LoadJar {
@@ -647,7 +646,7 @@ class Interpreter(val printer: Printer,
     def cp(jar: java.net.URL): Unit = {
       handleClasspath(jar)
     }
-    def ivy(coordinates: coursier.Dependency*): Unit = {
+    def ivy(coordinates: Dependency*): Unit = {
       loadIvy(coordinates:_*) match{
         case Left(failureMsg) =>
           throw new Exception(failureMsg)
@@ -666,14 +665,7 @@ class Interpreter(val printer: Printer,
     val colors = interp.colors
 
     def watch(p: os.Path) = interp.watch(p)
-
-    def configureCompiler(callback: scala.tools.nsc.Global => Unit) = {
-      compilerManager.configureCompiler(callback)
-    }
-
-    def preConfigureCompiler(callback: scala.tools.nsc.Settings => Unit) = {
-      compilerManager.preConfigureCompiler(callback)
-    }
+    def watchValue[T](v: => T): T = {interp.watchValue(v); v}
 
     val beforeExitHooks = interp.beforeExitHooks
 
@@ -714,30 +706,32 @@ class Interpreter(val printer: Printer,
       }
 
     }
+
+    def _compilerManager = interp.compilerManager
   }
 
 }
 
 object Interpreter{
 
-  def mtimeIfExists(p: os.Path) = if (os.exists(p)) os.mtime(p) else 0L
+  val predefImports = Imports(
+    ImportData("ammonite.interp.api.InterpBridge.value.exit"),
+    ImportData(
+      "ammonite.interp.api.IvyConstructor.{ArtifactIdExt, GroupIdExt}",
+      importType = ImportData.Type
+    ),
+    ImportData("""ammonite.compiler.CompilerExtensions.{
+      CompilerInterpAPIExtensions,
+      CompilerReplAPIExtensions
+    }"""),
+    ImportData("ammonite.runtime.tools.{browse, grep, time}"),
+    ImportData("ammonite.runtime.tools.tail", importType = ImportData.TermType),
+    ImportData("ammonite.compiler.tools.{desugar, source}"),
+    ImportData("mainargs.{arg, main}"),
+    ImportData("ammonite.repl.tools.Util.PathRead")
+  )
 
-  /**
-    * Recursively mtimes things, with the sole purpose of providing a number
-    * that will change if that file changes or that folder's contents changes
-    *
-    * Ensure we include the file paths within a folder as part of the folder
-    * signature, as file moves often do not update the mtime but we want to
-    * trigger a "something changed" event anyway
-    */
-  def pathSignature(p: os.Path) =
-    if (!os.exists(p)) 0L
-    else try {
-      if (os.isDir(p)) os.walk(p).map(x => x.hashCode + mtimeIfExists(x)).sum
-      else os.mtime(p)
-    } catch { case e: java.nio.file.NoSuchFileException =>
-      0L
-    }
+
 
   val SheBang = "#!"
   val SheBangEndPattern = Pattern.compile(s"""((?m)^!#.*)$newLine""")

@@ -9,6 +9,14 @@ import java.security.MessageDigest
 
 
 object Util{
+  val javaPrefixes = Set("java", "jdk", "javax")
+  def lookupWhiteList(whitelist: Set[Seq[String]], tokens: Seq[String]): Boolean = {
+    if (whitelist.isEmpty) true
+    else {
+      tokens.foreach(s => assert(!s.contains('/'), s))
+      javaPrefixes.contains(tokens.head) || whitelist(tokens)
+    }
+  }
   def withContextClassloader[T](contextClassloader: ClassLoader)(t: => T) = {
     val oldClassloader = Thread.currentThread().getContextClassLoader
     try{
@@ -69,9 +77,6 @@ object Util{
     */
   case class VersionedWrapperId(wrapperPath: String,
                                 tag: Tag)
-  object VersionedWrapperId{
-    implicit def rw: upickle.default.ReadWriter[VersionedWrapperId] = upickle.default.macroRW
-  }
 
 
 
@@ -121,4 +126,6 @@ object Util{
 
     transpose(xs, Nil).reverse
   }
+
+  case class Location(fileName: String, lineNum: Int, fileContent: String)
 }

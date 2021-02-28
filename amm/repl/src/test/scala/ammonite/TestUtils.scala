@@ -2,20 +2,30 @@ package ammonite
 
 import java.io.PrintStream
 
-import ammonite.interp.{CodeWrapper, Interpreter, Preprocessor}
+import ammonite.compiler.DefaultCodeWrapper
+import ammonite.interp.Interpreter
 import ammonite.main.Defaults
-import ammonite.runtime.{Frame, History, Storage}
+import ammonite.runtime.{Frame, Storage}
 import ammonite.util._
 import ammonite.runtime.ImportHook
 
-object TestUtils {
-  def scala2_11 = scala.util.Properties.versionNumberString.contains("2.11")
-  def scala2_12 = scala.util.Properties.versionNumberString.contains("2.12")
+import scala.language.dynamics
 
-  def createTestInterp(storage: Storage, predef: String = "") = {
-    val startFrame = Frame.createInitial()
+object TestUtils {
+  def scala2_11 = scala.util.Properties.versionNumberString.startsWith("2.11")
+  def scala2_12 = scala.util.Properties.versionNumberString.startsWith("2.12")
+
+  def createTestInterp(
+    storage: Storage,
+    predefImports: Imports = Imports(),
+    predef: String = ""
+  ) = {
+    val initialClassLoader = Thread.currentThread().getContextClassLoader
+    val startFrame = Frame.createInitial(initialClassLoader)
     val printStream = new PrintStream(System.out)
     val interp = new Interpreter(
+      ammonite.compiler.CompilerBuilder,
+      ammonite.compiler.Parsers,
 
       printer = Printer(
         printStream, new PrintStream(System.err), printStream,
@@ -23,21 +33,41 @@ object TestUtils {
       ),
       storage = storage,
       wd = os.pwd,
-      // Provide a custom predef so we can verify in tests that the predef gets cached
-      basePredefs = Seq(),
-      customPredefs = Seq(
-        PredefInfo(Name("predef"), predef, false, None)
-      ),
-      extraBridges = Seq(),
       colors = Ref(Colors.BlackWhite),
       getFrame = () => startFrame,
       createFrame = () => throw new Exception("unsupported"),
-      replCodeWrapper = CodeWrapper,
-      scriptCodeWrapper = CodeWrapper,
+      initialClassLoader = initialClassLoader,
+      replCodeWrapper = DefaultCodeWrapper,
+      scriptCodeWrapper = DefaultCodeWrapper,
       alreadyLoadedDependencies = Defaults.alreadyLoadedDependencies("amm-test-dependencies.txt"),
-      importHooks = ImportHook.defaults
+      importHooks = ImportHook.defaults,
+      classPathWhitelist = ammonite.repl.Repl.getClassPathWhitelist(thin = true)
     )
-    interp.initializePredef()
+    // Provide a custom predef so we can verify in tests that the predef gets cached
+    interp.initializePredef(
+      Seq(),
+      Seq(PredefInfo(Name("predef"), predef, false, None)),
+      Seq(),
+      predefImports
+    )
     interp
+  }
+
+  object Print extends Dynamic {
+    def applyDynamicNamed(className: String)(args: (String, Any)*): String = {
+      var indent = ""
+      val fields = args.flatMap {
+        case ("indent", value: String) => indent = value; Nil
+        case (name, value) =>
+          val repr =
+            if (scala2_12) s"$value"
+            else s"$name = $value"
+          Seq(repr)
+      }
+      if (indent.isEmpty())
+        s"$className(${fields.mkString(", ")})"
+      else
+        s"$className(\n${fields.map(indent + "  " + _).mkString(",\n")}\n$indent)"
+    }
   }
 }

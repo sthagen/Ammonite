@@ -22,21 +22,12 @@ object ScriptOutput{
                            leadingSpaces: String,
                            hookInfo: ImportHookInfo,
                            finalImports: Imports)
-  object BlockMetadata{
-    implicit def rw: upickle.default.ReadWriter[BlockMetadata] = upickle.default.macroRW
-  }
   case class Metadata(blockInfo: Seq[BlockMetadata])
-  object Metadata{
-    implicit def rw: upickle.default.ReadWriter[Metadata] = upickle.default.macroRW
-  }
 }
 
 case class ImportHookInfo(imports: Imports,
                           stmts: Seq[String],
                           trees: Seq[ImportTree])
-object ImportHookInfo{
-  implicit def rw: upickle.default.ReadWriter[ImportHookInfo] = upickle.default.macroRW
-}
 case class Evaluated(wrapper: Seq[Name],
                      imports: Imports)
 
@@ -64,14 +55,30 @@ case class ImportData(fromName: Name,
 
 
 object ImportData{
-  implicit val rw: upickle.default.ReadWriter[ImportData] = upickle.default.macroRW
   sealed case class ImportType(name: String)
-  object ImportType{
-    implicit val rw: upickle.default.ReadWriter[ImportType] = upickle.default.macroRW
-  }
   val Type = ImportType("Type")
   val Term = ImportType("Term")
   val TermType = ImportType("TermType")
+
+  def apply(name: String, importType: ImportType = Term): Seq[ImportData] = {
+    val elements = name.split('.')
+    assert(elements.nonEmpty)
+
+    val simpleNames =
+      if (elements.last.startsWith("{") && elements.last.endsWith("}"))
+        elements.last.stripPrefix("{").stripSuffix("}").split(',').map(_.trim).toSeq
+      else
+        Seq(elements.last)
+
+    simpleNames.map { simpleName =>
+      ImportData(
+        Name(simpleName),
+        Name(simpleName),
+        Name("_root_") :: elements.init.map(Name(_)).toList,
+        importType
+      )
+    }
+  }
 }
 
 /**
@@ -85,6 +92,12 @@ object ImportData{
   */
 class Imports private (val value: Seq[ImportData]){
   def ++(others: Imports) = Imports(this.value, others.value)
+  override def equals(obj: Any): Boolean =
+    obj match {
+      case other: Imports => value == other.value
+      case _ => false
+    }
+  override def hashCode(): Int = value.##
   override def toString() = {
     // Group the remaining imports into sliding groups according to their
     // prefix, while still maintaining their ordering
@@ -120,11 +133,6 @@ class Imports private (val value: Seq[ImportData]){
 }
 
 object Imports{
-  implicit val rw: upickle.default.ReadWriter[Imports] =
-    upickle.default.readwriter[Seq[ImportData]].bimap[Imports](
-      imports => imports.value,
-      data => Imports(data)
-  )
   // This isn't called directly, but we need to define it so uPickle can know
   // how to read/write imports
   def unapply(s: Imports): Option[Seq[ImportData]] = Some(s.value)

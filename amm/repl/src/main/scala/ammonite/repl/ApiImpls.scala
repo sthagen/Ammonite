@@ -1,12 +1,14 @@
 package ammonite.repl
 
 import ammonite.ops.Internals
+import ammonite.repl.api.{Clipboard, FrontEnd, FrontEndAPI, Session}
 import ammonite.runtime._
 import ammonite.util.Util._
-import ammonite.util._
+import ammonite.util.{Frame => _, _}
 
 import java.awt.Toolkit
 import java.awt.datatransfer.{DataFlavor, StringSelection}
+import java.util.Locale
 
 import scala.collection.mutable
 
@@ -133,4 +135,15 @@ object ClipboardImpl extends Clipboard {
     )
     systemClipboard.setContents(newContents, newContents)
   }
+}
+
+trait FrontEndAPIImpl extends FrontEndAPI {
+  protected def parser: ammonite.compiler.iface.Parser
+  def apply(name: String): FrontEnd =
+    name.toLowerCase(Locale.ROOT) match {
+      case "ammonite" => AmmoniteFrontEnd(parser)
+      case "windows" => new FrontEnds.JLineWindows(parser)
+      case "unix" => new FrontEnds.JLineUnix(parser)
+      case _ => throw new NoSuchElementException(s"Front-end $name")
+    }
 }

@@ -3,12 +3,11 @@ package ammonite.runtime
 import java.io.{ByteArrayOutputStream, File}
 import java.net.URI
 
-import ammonite.runtime.tools.IvyThing
+import ammonite.interp.api.IvyConstructor
 import ammonite.util.Util.CodeSource
 import ammonite.util._
-import coursier.core.{ModuleName, Organization}
+import coursierapi.{Dependency, IvyRepository, MavenRepository, Repository}
 
-import scala.io.Source
 import scala.util.{Failure, Success, Try}
 
 /**
@@ -39,6 +38,7 @@ object ImportHook{
     Seq("url") -> URL,
     Seq("file") -> File,
     Seq("exec") -> Exec,
+    Seq("repo") -> Repo,
     Seq("ivy") -> Ivy,
     Seq("cp") -> Classpath,
     Seq("plugin", "ivy") -> PluginIvy,
@@ -50,8 +50,8 @@ object ImportHook{
     * Interpreter. Open for extension, if someone needs more stuff, but by
     * default this is what is available.
     */
-  trait InterpreterInterface{
-    def loadIvy(coordinates: coursier.Dependency*): Either[String, Set[File]]
+  trait InterpreterInterface {
+    def loadIvy(coordinates: Dependency*): Either[String, Seq[File]]
     def watch(p: os.Path): Unit
   }
 
@@ -65,7 +65,12 @@ object ImportHook{
                       codeSource: CodeSource,
                       hookImports: Imports,
                       exec: Boolean) extends Result
-    case class ClassPath(file: os.Path, plugin: Boolean) extends Result
+    case class ClassPath(
+      origin: Option[Seq[coursierapi.Dependency]],
+      files: Seq[os.Path],
+      plugin: Boolean
+    ) extends Result
+    case class Repo(repo: coursierapi.Repository) extends Result
   }
 
   object File extends SourceHook(false)
@@ -163,31 +168,18 @@ object ImportHook{
         case _ => Left("Invalid $ivy import " + tree)
       }
     }
-    def resolve(interp: InterpreterInterface, signatures: Seq[String]) = {
+    def resolve(
+      interp: InterpreterInterface,
+      signatures: Seq[String]
+    ): Either[String, (Seq[Dependency], Seq[File])] = {
       val splitted = for (signature <- signatures) yield {
         signature.split(':') match{
           case Array(a, b, c) =>
-            Right(coursier.Dependency(coursier.Module(Organization(a), ModuleName(b)), c))
+            Right(Dependency.of(a, b, c))
           case Array(a, "", b, c) =>
-            Right(
-              coursier.Dependency(
-                coursier.Module(
-                  Organization(a),
-                  ModuleName(b + "_" + IvyThing.scalaBinaryVersion)
-                ),
-                c
-              )
-            )
+            Right(Dependency.of(a, b + "_" + IvyConstructor.scalaBinaryVersion, c))
           case Array(a, "", "", b, c) =>
-            Right(
-              coursier.Dependency(
-                coursier.Module(
-                  Organization(a),
-                  ModuleName(b + "_" + IvyThing.scalaFullBinaryVersion)
-                ),
-                c
-              )
-            )
+            Right(Dependency.of(a, b + "_" + IvyConstructor.scalaFullBinaryVersion, c))
           case _ => Left(signature)
         }
       }
@@ -196,17 +188,18 @@ object ImportHook{
       if (errors.nonEmpty)
         Left("Invalid $ivy imports: " + errors.map(Util.newLine + "  " + _).mkString)
       else
-        interp.loadIvy(successes: _*)
+        interp.loadIvy(successes: _*).map((successes, _))
     }
 
 
     def handle(source: CodeSource,
                tree: ImportTree,
                interp: InterpreterInterface,
-               wrapperPath: Seq[Name]) = for{
-      signatures <- splitImportTree(tree).right
-      resolved <- resolve(interp, signatures).right
-    } yield resolved.map(os.Path(_)).map(Result.ClassPath(_, plugin)).toSeq
+               wrapperPath: Seq[Name]): Either[String, Seq[Result.ClassPath]] = for{
+      signatures <- splitImportTree(tree)
+      depsResolved <- resolve(interp, signatures)
+      (deps, resolved) = depsResolved
+    } yield Seq(Result.ClassPath(Some(deps), resolved.map(os.Path(_)).toSeq, plugin))
   }
   object Classpath extends BaseClasspath(plugin = false)
   object PluginClasspath extends BaseClasspath(plugin = true)
@@ -214,7 +207,7 @@ object ImportHook{
     def handle(source: CodeSource,
                tree: ImportTree,
                interp: InterpreterInterface,
-               wrapperPath: Seq[Name]) = {
+               wrapperPath: Seq[Name]): Either[String, Seq[Result]] = {
       source.path match{
         case None => Left("Cannot resolve $cp import in code without source")
         case Some(currentScriptPath) =>
@@ -222,11 +215,10 @@ object ImportHook{
             tree, currentScriptPath, Seq(".jar", "")
           )
 
-          if (missing.nonEmpty) Left("Cannot resolve $cp import: " + missing.mkString(", "))
-          else Right(
-            for(((relativeModule, rename), filePath) <- relativeModules.zip(files))
-              yield Result.ClassPath(filePath, plugin)
-          )
+          if (missing.nonEmpty)
+            Left("Cannot resolve $cp import: " + missing.mkString(", "))
+          else
+            Right(Seq(Result.ClassPath(None, files, plugin)))
       }
 
     }
@@ -291,6 +283,24 @@ object ImportHook{
                 exec=false
               )
           })
+      }
+    }
+  }
+
+  object Repo extends ImportHook {
+    override def handle(source: CodeSource,
+                        tree: ImportTree,
+                        interp: InterpreterInterface,
+                        wrapperPath: Seq[Name]) = {
+      tree.prefix.headOption match {
+        case Some(url) if url.startsWith("ivy:") =>
+          val repo = IvyRepository.of(url.drop(4)) // dropping `ivy:` prefix
+          Right(Seq(Result.Repo(repo)))
+        case Some(url) =>
+          val repo = MavenRepository.of(url)
+          Right(Seq(Result.Repo(repo)))
+        case None =>
+          throw new IllegalArgumentException("$repo import failed")
       }
     }
   }

@@ -1,9 +1,10 @@
 package ammonite.interp
 
 
-import ammonite.runtime.{APIHolder, SpecialClassLoader, Storage}
+import ammonite.interp.api.InterpAPI
+import ammonite.runtime.{SpecialClassLoader, Storage}
 import ammonite.util.ScriptOutput.Metadata
-import ammonite.util.{Imports, Name, PredefInfo, Res}
+import ammonite.util.{ImportData, Imports, Name, PredefInfo, Res}
 import ammonite.util.Util.CodeSource
 
 /**
@@ -11,9 +12,41 @@ import ammonite.util.Util.CodeSource
   * initialization
   */
 object PredefInitialization {
-  def apply(bridges: Seq[(String, String, AnyRef)],
-            interpApi: InterpAPI,
-            evalClassloader: SpecialClassLoader,
+  def initBridge[T >: Null <: AnyRef](classloader: SpecialClassLoader,
+                    name: String,
+                    t: T) = {
+    classloader.findClassPublic(name + "$")
+    classloader.findClassPublic(name)
+      .getDeclaredMethods
+      .find(_.getName == "value0_$eq")
+      .get
+      .invoke(null, t)
+  }
+  def initBridges(bridges: Seq[(String, String)]): Imports = {
+
+    val allImports =
+      for ((name, shortName) <- bridges)
+        yield Imports(
+          Seq(ImportData(
+            Name("value"),
+            Name(shortName),
+            // FIXME Not sure special chars / backticked things in name are fine here
+            Name("_root_") +: name.stripPrefix("_root_.").split('.').map(Name(_)).toSeq,
+            ImportData.Term
+          ))
+        )
+
+    allImports.foldLeft(Imports())(_ ++ _)
+  }
+  def initBridges(bridges: Seq[(String, String, AnyRef)],
+                  evalClassloader: SpecialClassLoader): Imports = {
+
+    for ((name, shortName, bridge) <- bridges)
+      initBridge(evalClassloader, name, bridge)
+
+    initBridges(bridges.map { case (name, shortName, _) => (name, shortName) })
+  }
+  def apply(interpApi: InterpAPI,
             storage: Storage,
             basePredefs: Seq[PredefInfo],
             customPredefs: Seq[PredefInfo],
@@ -21,23 +54,7 @@ object PredefInitialization {
             addImports: Imports => Unit,
             watch: os.Path => Unit): Res[_] = {
 
-    for ((name, shortName, bridge) <- bridges ){
-      APIHolder.initBridge(evalClassloader, name, bridge)
-    }
-
-    // import ammonite.repl.ReplBridge.{value => repl}
-    // import ammonite.runtime.InterpBridge.{value => interp}
-    val bridgePredefs =
-      for ((name, shortName, bridge) <- bridges)
-      yield PredefInfo(
-        Name(s"${shortName}Bridge"),
-        s"import $name.{value => $shortName}",
-        true,
-        None
-      )
-
     val predefs = {
-      bridgePredefs ++
       basePredefs ++
       storage.loadPredef.map{
         case (code, path) =>
@@ -45,8 +62,6 @@ object PredefInitialization {
       } ++
       customPredefs
     }
-
-    predefs.filter(_.code.nonEmpty)
 
 
     Res.fold((), predefs){(_, predefInfo) =>

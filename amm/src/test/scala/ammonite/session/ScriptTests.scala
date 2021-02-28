@@ -35,7 +35,7 @@ object ScriptTests extends TestSuite{
             @ repl.load.exec($printedScriptPath/"PreserveImports.sc")
 
             @ val r = res
-            r: Left[String, Nothing] = Left("asd")
+            r: Left[String, Nothing] = ${Print.Left(value = "\"asd\"")}
             """)
         }
         test("annotation"){
@@ -180,7 +180,7 @@ object ScriptTests extends TestSuite{
             @ interp.load.module($printedScriptPath/"PreserveImports.sc")
 
             @ val r = res
-            r: Left[String, Nothing] = Left("asd")
+            r: Left[String, Nothing] = ${Print.Left(value = "\"asd\"")}
             """)
 
         }
@@ -257,7 +257,7 @@ object ScriptTests extends TestSuite{
           val storage = new Storage.Folder(os.temp.dir(prefix = "ammonite-tester"))
           val interp2 = createTestInterp(
             storage,
-            Defaults.predefString + Main.extraPredefString
+            predefImports = ammonite.interp.Interpreter.predefImports
           )
 
           val Res.Failure(msg) =
@@ -335,6 +335,13 @@ object ScriptTests extends TestSuite{
             error: Failed to resolve ivy dependencies
           """)
         }
+      }
+      test("resolverStatic"){
+          check.session(s"""
+            @ import os._
+
+            @ interp.load.module($printedScriptPath/"ResolversStatic.sc")
+          """)
       }
       test("loadIvyAdvanced"){
         check.session(s"""

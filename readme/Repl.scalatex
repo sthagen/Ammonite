@@ -9,7 +9,7 @@
 (fullClasspath in Test) ++= {
   (updateClassifiers in Test).value
     .configurations
-    .find(_.configuration == Test.name)
+    .find(_.configuration.name == Test.name)
     .get
     .modules
     .flatMap(_.artifacts)
@@ -49,12 +49,22 @@
 
   @hl.sh
     @readme.Sample.unstableCurl
-    
+
   @p
     Alternatively, on macOS you can install Ammonite via brew:
 
   @hl.sh
-    $ brew install ammonite-repl  
+    $ brew install ammonite-repl
+
+  @p
+    You can also download a bootstrap script, that can be downloaded and committed
+    to version control as a file `amm`:
+
+  @hl.sh
+    curl -L https://github.com/lihaoyi/ammonite/releases/download/@ammonite.Constants.version/2.13-@ammonite.Constants.version-bootstrap > amm && chmod +x amm
+
+  @p
+    You can then run Ammonite via the `./amm` command.
 
   @p
     This will give you access to the Ammonite-REPL:
@@ -121,7 +131,7 @@
     or if there are other main methods in the @code{Test} scope
 
   @code
-    sbt projectName/test:run-main amm
+    sbt projectName/test:runMain amm
 
   @p
     To activate the Ammonite REPL
@@ -146,7 +156,7 @@
 
     @sect{Pretty-printed output}
 
-      @hl.ref(advancedTests, Seq("'pprint", "@"), "\"\"\"")
+      @hl.ref(advancedTests, Seq("""test("pprint")""", "@"), "\"\"\"")
 
       @p
         Ammonite-REPL uses @lnk("PPrint", "https://lihaoyi.github.io/upickle-pprint/pprint/") to display its output by default. That means that everything is nicely formatted to fit within the width of the terminal, and is copy-paste-able!
@@ -160,7 +170,7 @@
         before truncation.
 
       @sect{Configurable Truncation}
-        @hl.ref(advancedTests, Seq("'truncation", "@"), "\"\"\"")
+        @hl.ref(advancedTests, Seq("""test("truncation")""", "@"), "\"\"\"")
 
         @p
           Ammonite-REPL intelligently truncates your output when it's beyond a
@@ -253,7 +263,7 @@
           @hl.scala("{ ... }"), and Ammonite will wait until you close it before
           evaluating the contents:
 
-        @hl.ref(advancedTests, Seq("'unwrapping", "@"))
+        @hl.ref(advancedTests, Seq("""test("unwrapping")""", "@"))
 
         @p
           As you can see, the contents of the @hl.scala("{ ... }") block are
@@ -267,7 +277,7 @@
           curlies and the block will be evaluated as a normal block, to a single
           expression:
 
-        @hl.ref(advancedTests, Seq("'forceWrapping", "@"))
+        @hl.ref(advancedTests, Seq("""test("forceWrapping")""", "@"))
 
       @sect{Undo & Redo}
         @img(src:="UndoRedo.gif", display.block, marginLeft.auto, marginRight.auto, height := 154)
@@ -440,7 +450,7 @@
           For example, here is loading @lnk("Scalaz",
           "https://github.com/scalaz/scalaz") and using it in the Ammonite-REPL:
 
-        @hl.ref(ammoniteTests/"ProjectTests.scala", Seq("'scalaz", "@"))
+        @hl.ref(ammoniteTests/"ProjectTests.scala", Seq("""test("scalaz")""", "@"))
 
         @p
           Note that the different portions of the @hl.scala{$ivy} import are
@@ -450,20 +460,20 @@
           @code{org:library:version} format, e.g. here we load the
           @lnk("Google Guava", "https://github.com/google/guava") Java library
 
-        @hl.ref(ammoniteTests/"ProjectTests.scala", Seq("'guava", "@"))
+        @hl.ref(ammoniteTests/"ProjectTests.scala", Seq("""test("guava")""", "@"))
 
         @p
           As well as the @code{org:::library:version} syntax for loading Scala
           libraries cross-published against the full Scala version (e.g.
           @code{2.12.2} rather than just @code{2.12}):
 
-        @hl.ref(ammoniteTests/"ImportHookTests.scala", Seq("'inlineFull", "@"))
+        @hl.ref(ammoniteTests/"ImportHookTests.scala", Seq("""test("inlineFull")""", "@"))
 
         @p
           If you want to load a compiler plugin, you can do so using
           @hl.scala{import $plugin.$ivy}:
 
-        @hl.ref(ammoniteTests/"AdvancedTests.scala", Seq("'compilerPlugin", "@"))
+        @hl.ref(ammoniteTests/"AdvancedTests.scala", Seq("""test("compilerPlugin")""", "@"))
 
         @p
           This makes Ammonite ideal for trying out new libraries or tools. You
@@ -483,7 +493,7 @@
         @p
           Ammonite-REPL is configured with a set of default resolvers but you
           can add your own using
-          @lnk("Coursier's Repository APIs", "https://github.com/coursier/coursier#api-1")
+          @lnk("Coursier's Repository APIs", "https://github.com/coursier/interface")
 
         @hl.ref(ammoniteTests/"ProjectTests.scala", Seq("resolvers", "@"), "\"\"\"")
 
@@ -491,20 +501,33 @@
           Including repositories which need authentication:
 
         @hl.scala
-          import coursier.core.Authentication, coursier.MavenRepository
+          import coursierapi.{Credentials, MavenRepository}
 
-          interp.repositories() ++= Seq(MavenRepository(
-            "https://nexus.corp.com/content/repositories/releases",
-            authentication = Some(Authentication("user", "pass"))
-          ))
+          interp.repositories() ++= Seq(
+            MavenRepository
+              .of("https://nexus.corp.com/content/repositories/releases")
+              .withCredentials(Credentials.of("user", "pass"))
+          )
 
         @p
           If you need more detailed control over what you are importing, e.g.
           with attributes, classifiers or exclusions, you can fall back to
-          using the @hl.scala{interp.load.ivy(deps: coursier.Dependency*)}
+          using the @hl.scala{interp.load.ivy(deps: coursierapi.Dependency*)}
           function and configure each @code{Dependency} to your heart's content:
 
         @hl.ref(scriptTests, Seq("loadIvyAdvanced", "@"), "\"\"\"")
+
+      @sect{import $repo}
+        @p
+          Lets you statically add Maven or Ivy repositories that will be used during artifact
+          resolution. This mechanism does not (yet) allow for credentials registration. (
+
+        @hl.ref(ammoniteTests/"ProjectTests.scala", Seq("resolversStatic", "@"), "\"\"\"")
+
+        @p
+          NB: Prefixing the url pattern with "ivy:", such as
+          @hl.scala{import $repo.`ivy:https://dl.bintray.com/typesafe/ivy-releases/[defaultPattern]`},
+          is required for ivy repositories. Maven repositories do not require any prefix
 
     @sect{Builtins}
       @p
@@ -537,7 +560,7 @@
           @code{repl.history}, @code{repl.width}, @code{repl.frontEnd()} to
           change the front-end terminal implementation, etc.:
 
-        @hl.ref('amm/'repl/'src/'main/'scala/'ammonite/'repl/"ReplAPI.scala", "trait ReplAPI")
+        @hl.ref('amm/"repl"/"api"/'src/'main/'scala/'ammonite/'repl/'api/"ReplAPI.scala", "trait ReplAPI")
 
         @p
           All of these are available as part of the @hl.scala{repl} object
@@ -545,7 +568,7 @@
           functionality available under the @code{interp} object, which is also
           available in scripts:
 
-        @hl.ref('amm/'interp/'src/'main/'scala/'ammonite/'interp/"InterpAPI.scala", "trait InterpAPI")
+        @hl.ref('amm/"interp"/"api"/'src/'main/'scala/'ammonite/'interp/'api/"InterpAPI.scala", "trait InterpAPI")
 
       @sect{Utilities}
         @p
@@ -777,7 +800,7 @@
         important work, do whatever you want later, and simply discard all the
         jars you loaded, variables you defined
 
-      @hl.ref(ammoniteTests/"BuiltinTests.scala", Seq("'saveLoad", "@"))
+      @hl.ref(ammoniteTests/"BuiltinTests.scala", Seq("""test("saveLoad")""", "@"))
       @p
         Apart from plain @hl.scala{save}s and @hl.scala{load}s, which simply
         discard everything after the most recent save, you can also provide a
@@ -785,7 +808,7 @@
         something else for a while, and be able to come back later to continue
         where you left off:
 
-      @hl.ref(ammoniteTests/"BuiltinTests.scala", Seq("'saveLoad2", "@"))
+      @hl.ref(ammoniteTests/"BuiltinTests.scala", Seq("""test("saveLoad2")""", "@"))
 
 
       @p

@@ -1,6 +1,6 @@
 package ammonite
 
-import ammonite.interp.{CodeClassWrapper, Preprocessor}
+import ammonite.compiler.CodeClassWrapper
 import ammonite.util.{Evaluated, Res}
 
 /**

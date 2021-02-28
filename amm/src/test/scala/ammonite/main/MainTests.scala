@@ -10,8 +10,8 @@ import utest._
   * and the associated error behavior if the caller messes up.
  */
 object MainTests extends TestSuite{
-  def exec(p: os.RelPath, args: String*) =
-    new InProcessMainMethodRunner(os.rel / 'mains/p, Nil, args)
+  def exec(p: String, args: String*) =
+    new InProcessMainMethodRunner(os.rel / 'mains / p, Nil, args)
 
   def stripInvisibleMargin(s: String): String = {
     val lines = Predef.augmentString(s).lines.toArray
@@ -75,18 +75,7 @@ object MainTests extends TestSuite{
           assert(!evaled.success)
           val out = evaled.err
           val expected = stripInvisibleMargin(
-            s"""
-              Need to specify a subcommand to call when running MultiMain.sc
-
-              Available subcommands:
-
-                mainA
-
-                functionB
-                  --i     Int
-                  --s     String
-                  --path  os.Path (default ${os.pwd})
-            """.stripMargin
+            "Need to specify a sub command: mainA, functionB"
           )
           assert(out.contains(expected.trim))
         }
@@ -95,20 +84,7 @@ object MainTests extends TestSuite{
           assert(!evaled.success)
           val out = evaled.err
           val expected = stripInvisibleMargin(
-            s"""
-              Need to specify a subcommand to call when running MultiMainDoc.sc
-
-              Available subcommands:
-
-                mainA
-
-                functionB
-                This explains what the function does
-                  --i     Int: how many times to repeat the string to make it very very long,
-                          more than it originally was
-                  --s     String: the string to repeat
-                  --path  os.Path (default ${os.pwd})
-            """
+            "Need to specify a sub command: mainA, functionB"
           )
           assert(out.contains(expected.trim))
         }
@@ -117,20 +93,7 @@ object MainTests extends TestSuite{
           assert(!evaled.success)
           val out = evaled.err
           val expected = stripInvisibleMargin(
-            s"""
-              Unable to find subcommand: doesntExist
-
-              Available subcommands:
-
-                mainA
-
-                functionB
-                This explains what the function does
-                  --i     Int: how many times to repeat the string to make it very very long,
-                          more than it originally was
-                  --s     String: the string to repeat
-                  --path  os.Path (default ${os.pwd})
-            """
+            "Unable to find subcommand: doesntExist, available subcommands: mainA, functionB"
           )
           assert(out.contains(expected.trim))
         }
@@ -143,7 +106,7 @@ object MainTests extends TestSuite{
 
     test("args"){
       test("full"){
-        val evaled = exec("Args.sc", "-i", "3", "--s", "Moo", (os.pwd/'omg/'moo).toString)
+        val evaled = exec("Args.sc", "-i", "3", "-s", "Moo", (os.pwd/'omg/'moo).toString)
         assert(evaled.success)
         assert(evaled.out == ("\"Hello! MooMooMoo moo.\"" + Util.newLine))
       }
@@ -167,21 +130,17 @@ object MainTests extends TestSuite{
         )
       }
       val argsUsageMsg =
-        s"""
-           |Arguments provided did not match expected signature:
-           |
-           |main
-           |  --i     Int
-           |  --s     String
-           |  --path  os.Path (default ${os.pwd})
-           |""".stripMargin
+        s"""Expected Signature: main
+           |  -i <int>
+           |  -s <str>
+           |  --path <path>""".stripMargin
       test("tooFew"){
         val evaled = exec("Args.sc", "3")
         assert(!evaled.success)
 
         assert(evaled.err.contains(
           Util.normalizeNewlines(
-            s"""Missing argument: (--s: String)
+            s"""Missing argument: -s <str>
                |$argsUsageMsg""".stripMargin
           )
         ))
@@ -209,7 +168,7 @@ object MainTests extends TestSuite{
 
         assert(evaled.err.contains(
           Util.normalizeNewlines(
-            s"""Option (--s: String) is missing a corresponding value
+            s"""Incomplete argument -s <str> is missing a corresponding value
                |$argsUsageMsg""".stripMargin
           )
         ))
@@ -221,7 +180,7 @@ object MainTests extends TestSuite{
         // them on to their own custom argument parsing code (e.g. scopt)
         val evaled = exec("Varargs.sc",
           // Normal args get fulfilled
-          "--i", "31337", "zomg",
+          "-i", "31337", "zomg",
           // Make sure single-dash -cow has the single-dash preserved
           "-cow", "--omg",
           // Random non-keyword args get passed straight through
@@ -265,9 +224,9 @@ object MainTests extends TestSuite{
 
         assert(evaled.err.contains(
           Util.normalizeNewlines(
-            s"""Missing argument: (--s: String)
+            s"""Missing argument: -s <str>
                |Unknown arguments: "--unknown" "6"
-               |Duplicate arguments for (--i: Int): "3" "4"
+               |Duplicate arguments for -i <int>: "3" "4"
                |$argsUsageMsg""".stripMargin
           )
         ))
@@ -277,18 +236,14 @@ object MainTests extends TestSuite{
         assert(!evaled.success)
 
         val exMsg = """java.lang.NumberFormatException: For input string: "foo""""
+
         assert(evaled.err.contains(
           Util.normalizeNewlines(
-            s"""The following argument failed to parse:
-               |
-               |--i: Int = "foo" failed to parse with $exMsg
-               |
-               |expected signature:
-               |
-               |main
-               |  --i     Int
-               |  --s     String
-               |  --path  os.Path (default ${os.pwd})
+            s"""Invalid argument -i <int> failed to parse "foo" due to $exMsg
+               |Expected Signature: main
+               |  -i <int>
+               |  -s <str>
+               |  --path <path>
                |""".stripMargin
           )
         ))

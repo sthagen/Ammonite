@@ -3,8 +3,8 @@ package ammonite.main
 
 import java.io.InputStream
 
-import ammonite.util.Util
-import coursier.core.{ModuleName, Organization}
+import ammonite.util.{ImportData, Imports, Util}
+import coursierapi.Dependency
 
 import scala.io.Codec
 
@@ -17,48 +17,25 @@ object Defaults{
     def ammoniteVersion = ammonite.Constants.version
     def scalaVersion = scala.util.Properties.versionNumberString
     def javaVersion = System.getProperty("java.version")
-    val link = "www.patreon.com/lihaoyi"
     Util.normalizeNewlines(
-      s"""Welcome to the Ammonite Repl $ammoniteVersion
-          |(Scala $scalaVersion Java $javaVersion)
-          |If you like Ammonite, please support our development at $link""".stripMargin
+      s"Welcome to the Ammonite Repl $ammoniteVersion (Scala $scalaVersion Java $javaVersion)"
     )
   }
 
-  // Need to import stuff from ammonite.ops manually, rather than from the
-  // ammonite.ops.Extensions bundle, because otherwise they result in ambiguous
-  // imports if someone else imports maunally
-  val predefString = s"""
-    |import ammonite.ops.{
-    |  PipeableImplicit,
-    |  FilterMapExtImplicit,
-    |  FilterMapArraysImplicit,
-    |  FilterMapIteratorsImplicit,
-    |  FilterMapGeneratorsImplicit,
-    |  SeqFactoryFunc,
-    |  RegexContextMaker,
-    |  Callable1Implicit
-    |}
-    |import ammonite.runtime.tools._
-    |import ammonite.repl.tools._
-    |import ammonite.runtime.tools.IvyConstructor.{ArtifactIdExt, GroupIdExt}
-    |import ammonite.interp.InterpBridge.value.exit
-    |""".stripMargin
-
-  val replPredef = """
-    |import ammonite.repl.ReplBridge.value.{
-    |  codeColorsImplicit,
-    |  tprintColorsImplicit,
-    |  pprinterImplicit,
-    |  show,
-    |  typeOf
-    |}
-  """.stripMargin
+  val replImports = Imports(
+    ImportData("""ammonite.repl.ReplBridge.value.{
+      codeColorsImplicit,
+      tprintColorsImplicit,
+      pprinterImplicit,
+      show,
+      typeOf
+    }""")
+  )
   def ammoniteHome = os.Path(System.getProperty("user.home"))/".ammonite"
 
   def alreadyLoadedDependencies(
     resourceName: String = "amm-dependencies.txt"
-  ): Seq[coursier.Dependency] = {
+  ): Seq[Dependency] = {
 
     var is: InputStream = null
 
@@ -72,7 +49,7 @@ object Defaults{
         .filter(_.nonEmpty)
         .map(l => l.split(':') match {
           case Array(org, name, ver) =>
-            coursier.Dependency(coursier.Module(Organization(org), ModuleName(name)), ver)
+            Dependency.of(org, name, ver)
           case other =>
             throw new Exception(s"Cannot parse line '$other' from resource $resourceName")
         })

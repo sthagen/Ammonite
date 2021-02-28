@@ -1,17 +1,24 @@
 package ammonite
 
 import java.io.{InputStream, OutputStream, PrintStream}
+import java.net.URLClassLoader
 import java.nio.file.NoSuchFileException
 
-import ammonite.interp.{CodeClassWrapper, CodeWrapper, Interpreter, Preprocessor}
+import ammonite.compiler.{CodeClassWrapper, DefaultCodeWrapper}
+import ammonite.compiler.iface.{CodeWrapper, CompilerBuilder, Parser}
+import ammonite.interp.{Watchable, Interpreter, PredefInitialization}
+import ammonite.interp.script.AmmoniteBuildServer
 import ammonite.runtime.{Frame, Storage}
 import ammonite.main._
-import ammonite.repl.Repl
+import ammonite.repl.{FrontEndAPIImpl, Repl}
 import ammonite.util.Util.newLine
 import ammonite.util._
 
 import scala.annotation.tailrec
 import ammonite.runtime.ImportHook
+import coursierapi.Dependency
+import scala.concurrent.Await
+import scala.concurrent.duration.Duration
 
 
 
@@ -66,20 +73,33 @@ case class Main(predefCode: String = "",
                 verboseOutput: Boolean = true,
                 remoteLogging: Boolean = true,
                 colors: Colors = Colors.Default,
-                replCodeWrapper: CodeWrapper = CodeWrapper,
-                scriptCodeWrapper: CodeWrapper = CodeWrapper,
-                alreadyLoadedDependencies: Seq[coursier.Dependency] =
+                replCodeWrapper: CodeWrapper = DefaultCodeWrapper,
+                scriptCodeWrapper: CodeWrapper = DefaultCodeWrapper,
+                alreadyLoadedDependencies: Seq[Dependency] =
                   Defaults.alreadyLoadedDependencies(),
-                importHooks: Map[Seq[String], ImportHook] = ImportHook.defaults){
+                importHooks: Map[Seq[String], ImportHook] = ImportHook.defaults,
+                compilerBuilder: CompilerBuilder = ammonite.compiler.CompilerBuilder,
+                // by-name, so that fastparse isn't loaded when we don't need it
+                parser: () => Parser = () => ammonite.compiler.Parsers,
+                classPathWhitelist: Set[Seq[String]] = Set.empty){
 
   def loadedPredefFile = predefFile match{
     case Some(path) =>
       try Right(Some(PredefInfo(Name("FilePredef"), os.read(path), false, Some(path))))
       catch{case e: NoSuchFileException =>
-        Left((Res.Failure("Unable to load predef file " + path), Seq(path -> 0L)))
+        Left((
+          Res.Failure("Unable to load predef file " + path),
+          Seq((Watchable.Path(path),  0L)))
+        )
       }
     case None => Right(None)
   }
+
+  def initialClassLoader: ClassLoader = {
+    val contextClassLoader = Thread.currentThread().getContextClassLoader
+    new Main.WhiteListClassLoader(classPathWhitelist, contextClassLoader)
+  }
+
   /**
     * Instantiates an ammonite.Repl using the configuration
     */
@@ -87,10 +107,9 @@ case class Main(predefCode: String = "",
 
 
     loadedPredefFile.right.map{ predefFileInfoOpt =>
-      val augmentedPredef = Main.maybeDefaultPredef(
-        defaultPredef,
-        Defaults.replPredef + Defaults.predefString + Main.extraPredefString
-      )
+      val augmentedImports =
+        if (defaultPredef) Defaults.replImports ++ Interpreter.predefImports
+        else Imports()
 
       val argString = replArgs.zipWithIndex.map{ case (b, idx) =>
         s"""
@@ -108,8 +127,8 @@ case class Main(predefCode: String = "",
       new Repl(
         inputStream, outputStream, errorStream,
         storage = storageBackend,
+        baseImports = augmentedImports,
         basePredefs = Seq(
-          PredefInfo(Name("DefaultPredef"), augmentedPredef, true, None),
           PredefInfo(Name("ArgsPredef"), argString, false, None)
         ),
         customPredefs = predefFileInfoOpt.toSeq ++ Seq(
@@ -122,7 +141,11 @@ case class Main(predefCode: String = "",
         replCodeWrapper = replCodeWrapper,
         scriptCodeWrapper = scriptCodeWrapper,
         alreadyLoadedDependencies = alreadyLoadedDependencies,
-        importHooks = importHooks
+        importHooks = importHooks,
+        compilerBuilder = compilerBuilder,
+        parser = parser(),
+        initialClassLoader = initialClassLoader,
+        classPathWhitelist = classPathWhitelist
       )
     }
 
@@ -130,10 +153,9 @@ case class Main(predefCode: String = "",
 
   def instantiateInterpreter() = {
     loadedPredefFile.right.flatMap { predefFileInfoOpt =>
-      val augmentedPredef = Main.maybeDefaultPredef(
-        defaultPredef,
-        Defaults.predefString + Main.extraPredefString
-      )
+      val augmentedImports =
+        if (defaultPredef) Interpreter.predefImports
+        else Imports()
 
       val (colorsRef, printer) = Interpreter.initPrinters(
         colors,
@@ -141,29 +163,39 @@ case class Main(predefCode: String = "",
         errorStream,
         verboseOutput
       )
-      val frame = Frame.createInitial()
+      val frame = Frame.createInitial(initialClassLoader)
 
-      val interp: Interpreter = new Interpreter(
+      val customPredefs = predefFileInfoOpt.toSeq ++ Seq(
+        PredefInfo(Name("CodePredef"), predefCode, false, None)
+      )
+      lazy val parser0 = parser()
+      val interp = new Interpreter(
+        ammonite.compiler.CompilerBuilder,
+        parser0,
         printer,
         storageBackend,
-        basePredefs = Seq(
-          PredefInfo(Name("DefaultPredef"), augmentedPredef, false, None)
-        ),
-        predefFileInfoOpt.toSeq ++ Seq(
-          PredefInfo(Name("CodePredef"), predefCode, false, None)
-        ),
-        Vector.empty,
         wd,
         colorsRef,
         verboseOutput,
         () => frame,
         () => throw new Exception("session loading / saving not possible here"),
+        initialClassLoader = initialClassLoader,
         replCodeWrapper,
         scriptCodeWrapper,
         alreadyLoadedDependencies = alreadyLoadedDependencies,
-        importHooks = importHooks
+        importHooks = importHooks,
+        classPathWhitelist = classPathWhitelist
       )
-      interp.initializePredef() match{
+      val bridges = Seq(
+        (
+          "ammonite.repl.api.FrontEndBridge",
+          "frontEnd",
+          new FrontEndAPIImpl {
+            def parser = parser0
+          }
+        )
+      )
+      interp.initializePredef(Seq(), customPredefs, bridges, augmentedImports) match{
         case None => Right(interp)
         case Some(problems) => Left(problems)
       }
@@ -179,7 +211,7 @@ case class Main(predefCode: String = "",
     * a sequence of paths that were watched as a result of this REPL run, in
     * case you wish to re-start the REPL when any of them change.
     */
-  def run(replArgs: Bind[_]*): (Res[Any], Seq[(os.Path, Long)]) = {
+  def run(replArgs: Bind[_]*): (Res[Any], Seq[(Watchable, Long)]) = {
 
 
     instantiateRepl(replArgs.toIndexedSeq) match{
@@ -198,7 +230,7 @@ case class Main(predefCode: String = "",
           warmupThread.start()
 
           val exitValue = Res.Success(repl.run())
-          (exitValue.map(repl.beforeExit), repl.interp.watchedFiles.toSeq)
+          (exitValue.map(repl.beforeExit), repl.interp.watchedValues.toSeq)
         }
     }
   }
@@ -208,13 +240,13 @@ case class Main(predefCode: String = "",
     * of `args` and a map of keyword `kwargs` to pass to that file.
     */
   def runScript(path: os.Path,
-                scriptArgs: Seq[(String, Option[String])])
-                : (Res[Any], Seq[(os.Path, Long)]) = {
+                scriptArgs: Seq[String])
+                : (Res[Any], Seq[(Watchable, Long)]) = {
 
     instantiateInterpreter() match{
       case Right(interp) =>
         val result = main.Scripts.runScript(wd, path, interp, scriptArgs)
-        (result, interp.watchedFiles.toSeq)
+        (result, interp.watchedValues.toSeq)
       case Left(problems) => problems
     }
   }
@@ -226,7 +258,7 @@ case class Main(predefCode: String = "",
     instantiateInterpreter() match{
       case Right(interp) =>
         val res = interp.processExec(code, 0, () => ())
-        (res, interp.watchedFiles.toSeq)
+        (res, interp.watchedValues.toSeq)
       case Left(problems) => problems
     }
   }
@@ -260,21 +292,37 @@ object Main{
             stdErr: OutputStream): Boolean = {
     val printErr = new PrintStream(stdErr)
     val printOut = new PrintStream(stdOut)
-    // We have to use explicit flatmaps instead of a for-comprehension here
-    // because for-comprehensions fail to compile complaining about needing
-    // withFilter
-    Cli.groupArgs(args, Cli.ammoniteArgSignature, Cli.Config()) match{
+
+
+    val customName = s"Ammonite REPL & Script-Runner, ${ammonite.Constants.version}"
+    val customDoc = "usage: amm [ammonite-options] [script-file [script-options]]"
+    Config.parser.constructEither(args, customName = customName, customDoc = customDoc) match{
       case Left(msg) =>
         printErr.println(msg)
         false
-      case Right((cliConfig, leftoverArgs)) =>
-        if (cliConfig.help) {
-          printOut.println(Cli.ammoniteHelp)
+      case Right(cliConfig) =>
+        if (cliConfig.core.bsp.value) {
+          val buildServer = new AmmoniteBuildServer(
+            ammonite.compiler.CompilerBuilder,
+            ammonite.compiler.Parsers,
+            ammonite.compiler.DefaultCodeWrapper,
+            initialScripts = cliConfig.rest.map(os.Path(_)),
+            initialImports = PredefInitialization.initBridges(
+              Seq("ammonite.interp.api.InterpBridge" -> "interp")
+            ) ++ AmmoniteBuildServer.defaultImports
+          )
+          printErr.println("Starting BSP server")
+          val (launcher, shutdownFuture) = AmmoniteBuildServer.start(buildServer)
+          Await.result(shutdownFuture, Duration.Inf)
+          printErr.println("BSP server done")
           true
         }else{
 
-          val runner = new MainRunner(cliConfig, printOut, printErr, stdIn, stdOut, stdErr)
-          (cliConfig.code, leftoverArgs) match{
+          val runner = new MainRunner(
+            cliConfig, printOut, printErr, stdIn, stdOut, stdErr,
+            os.pwd
+          )
+          (cliConfig.core.code, cliConfig.rest.toList) match{
             case (Some(code), Nil) =>
               runner.runCode(code)
 
@@ -300,9 +348,6 @@ object Main{
     }
   }
 
-  def maybeDefaultPredef(enabled: Boolean, predef: String) =
-    if (enabled) predef else ""
-
 
   /**
     * Detects if the console is interactive; lets us make console-friendly output
@@ -313,11 +358,24 @@ object Main{
     */
   def isInteractive() = System.console() != null
 
-  val extraPredefString = s"""
-    |import ammonite.main.Router.{doc, main}
-    |import ammonite.main.Scripts.pathScoptRead
-    |""".stripMargin
 
+  class WhiteListClassLoader(whitelist: Set[Seq[String]], parent: ClassLoader)
+    extends URLClassLoader(Array(), parent){
+    override def loadClass(name: String, resolve: Boolean) = {
+      val tokens = name.split('.')
+      if (Util.lookupWhiteList(whitelist, tokens.init ++ Seq(tokens.last + ".class"))) {
+        super.loadClass(name, resolve)
+      }
+      else {
+        throw new ClassNotFoundException(name)
+      }
+
+    }
+    override def getResource(name: String) = {
+      if (Util.lookupWhiteList(whitelist, name.split('/'))) super.getResource(name)
+      else null
+    }
+  }
 }
 
 /**
@@ -327,15 +385,16 @@ object Main{
   * - Handling for the common input/output streams and print-streams
   * - Logic around the watch-and-rerun flag
   */
-class MainRunner(cliConfig: Cli.Config,
+class MainRunner(cliConfig: Config,
                  outprintStream: PrintStream,
                  errPrintStream: PrintStream,
                  stdIn: InputStream,
                  stdOut: OutputStream,
-                 stdErr: OutputStream){
+                 stdErr: OutputStream,
+                 wd: os.Path){
 
   val colors =
-    if(cliConfig.colored.getOrElse(Main.isInteractive())) Colors.Default
+    if(cliConfig.core.color.getOrElse(Main.isInteractive())) Colors.Default
     else Colors.BlackWhite
 
   def printInfo(s: String) = errPrintStream.println(colors.info()(s))
@@ -343,11 +402,11 @@ class MainRunner(cliConfig: Cli.Config,
 
   @tailrec final def watchLoop[T](isRepl: Boolean,
                                   printing: Boolean,
-                                  run: Main => (Res[T], Seq[(os.Path, Long)])): Boolean = {
+                                  run: Main => (Res[T], Seq[(Watchable, Long)])): Boolean = {
     val (result, watched) = run(initMain(isRepl))
 
     val success = handleWatchRes(result, printing)
-    if (!cliConfig.watch) success
+    if (!cliConfig.core.watch.value) success
     else{
       watchAndWait(watched)
       watchLoop(isRepl, printing, run)
@@ -358,17 +417,17 @@ class MainRunner(cliConfig: Cli.Config,
     watchLoop(
       isRepl = false,
       printing = true,
-      _.runScript(scriptPath, Scripts.groupArgs(scriptArgs))
+      _.runScript(scriptPath, scriptArgs)
     )
 
   def runCode(code: String) = watchLoop(isRepl = false, printing = false, _.runCode(code))
 
   def runRepl(): Unit = watchLoop(isRepl = true, printing = false, _.run())
 
-  def watchAndWait(watched: Seq[(os.Path, Long)]) = {
+  def watchAndWait(watched: Seq[(Watchable, Long)]) = {
     printInfo(s"Watching for changes to ${watched.length} files... (Ctrl-C to exit)")
-    def statAll() = watched.forall{ case (file, lastMTime) =>
-      Interpreter.pathSignature(file) == lastMTime
+    def statAll() = watched.forall{ case (check, lastMTime) =>
+      check.poll() == lastMTime
     }
 
     while(statAll()) Thread.sleep(100)
@@ -394,38 +453,42 @@ class MainRunner(cliConfig: Cli.Config,
     success
   }
 
-
   def initMain(isRepl: Boolean) = {
-    val storage = if (!cliConfig.homePredef) {
-      new Storage.Folder(cliConfig.home, isRepl) {
+    val storage = if (cliConfig.predef.noHomePredef.value) {
+      new Storage.Folder(cliConfig.core.home, isRepl) {
         override def loadPredef = None
       }
     }else{
-      new Storage.Folder(cliConfig.home, isRepl)
+      new Storage.Folder(cliConfig.core.home, isRepl)
     }
 
+    lazy val parser = ammonite.compiler.Parsers
     val codeWrapper =
-      if (cliConfig.classBased)
-        CodeClassWrapper
-      else
-        CodeWrapper
+      if (cliConfig.repl.classBased.value) CodeClassWrapper
+      else DefaultCodeWrapper
 
     Main(
-      cliConfig.predefCode,
-      cliConfig.predefFile,
-      cliConfig.defaultPredef,
+      cliConfig.predef.predefCode,
+      cliConfig.core.predefFile,
+      !cliConfig.core.noDefaultPredef.value,
       storage,
-      wd = cliConfig.wd,
+      wd = wd,
       inputStream = stdIn,
       outputStream = stdOut,
       errorStream = stdErr,
-      welcomeBanner = cliConfig.welcomeBanner,
-      verboseOutput = cliConfig.verboseOutput,
-      remoteLogging = cliConfig.remoteLogging,
+      welcomeBanner = cliConfig.repl.banner match{case "" => None case s => Some(s)},
+      verboseOutput = !cliConfig.core.silent.value,
+      remoteLogging = !cliConfig.repl.noRemoteLogging.value,
       colors = colors,
       replCodeWrapper = codeWrapper,
-      scriptCodeWrapper = codeWrapper
-    )
+      scriptCodeWrapper = codeWrapper,
+      parser = () => parser,
+      alreadyLoadedDependencies =
+        Defaults.alreadyLoadedDependencies(),
+      classPathWhitelist = ammonite.repl.Repl.getClassPathWhitelist(cliConfig.core.thin.value)
 
+    )
   }
+
+
 }

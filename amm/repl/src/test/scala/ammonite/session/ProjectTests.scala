@@ -4,8 +4,6 @@ import ammonite.DualTestRepl
 import ammonite.TestUtils._
 import utest._
 
-import scala.collection.{immutable => imm}
-
 object ProjectTests extends TestSuite{
   val tests = Tests{
     println("ProjectTests")
@@ -72,9 +70,8 @@ object ProjectTests extends TestSuite{
               @ import $ivy.`com.ambiata::mundane:1.2.1-20141230225616-50fc792`
               error: Failed to resolve ivy dependencies
 
-              @ interp.repositories() ++= Seq(coursier.ivy.IvyRepository.fromPattern(
-              @   "https://ambiata-oss.s3-ap-southeast-2.amazonaws.com/" +:
-              @   coursier.ivy.Pattern.default
+              @ interp.repositories() ++= Seq(coursierapi.IvyRepository.of(
+              @   "https://ambiata-oss.s3-ap-southeast-2.amazonaws.com/[defaultPattern]"
               @ ))
 
               @ import $ivy.`com.ambiata::mundane:1.2.1-20141230225616-50fc792`
@@ -82,6 +79,15 @@ object ProjectTests extends TestSuite{
               @ import com.ambiata.mundane._
             """)
           }
+        }
+        test("resolversStatic"){
+          check.session("""
+            @ import $repo.`https://jitpack.io`
+
+            @ import $ivy.`com.github.jupyter:jvm-repr:0.4.0`
+
+            @ import jupyter._
+          """)
         }
       }
       test("code"){
@@ -112,11 +118,11 @@ object ProjectTests extends TestSuite{
     }
 
     test("scalaz"){
-      check.session("""
-        @ import $ivy.`org.scalaz::scalaz-core:7.2.27`, scalaz._, Scalaz._
+      check.session(s"""
+        @ import $$ivy.`org.scalaz::scalaz-core:7.2.27`, scalaz._, Scalaz._
 
         @ (Option(1) |@| Option(2))(_ + _)
-        res1: Option[Int] = Some(3)
+        res1: Option[Int] = ${Print.Some(value = 3)}
       """)
     }
     test("cats"){
@@ -156,7 +162,7 @@ object ProjectTests extends TestSuite{
       // For some reason this blows up in 2.11.x
       // Prevent regressions when wildcard-importing things called `macro` or `_`
       if (scala2_12) check.session(s"""
-        @ import scalaparse.Scala._
+        @ import $$ivy.`com.lihaoyi::scalaparse:2.0.5`, scalaparse.Scala._
 
         @ 1
         res1: Int = 1
@@ -263,7 +269,7 @@ object ProjectTests extends TestSuite{
 
     test("deeplearning"){
       // DeepLearning.scala 2.0.0-RC0 isn't published for scala 2.13
-      if (scala2_11 || scala2_12) check.session(
+      if (scala2_12) check.session(
         """
         @ import $ivy.`com.thoughtworks.deeplearning::plugins-builtins:2.0.0-RC0`
         import $ivy.$
@@ -290,7 +296,7 @@ object ProjectTests extends TestSuite{
       check.session(
         """
         @ interp.repositories() ++= Seq(
-        @     coursier.maven.MavenRepository("https://jitpack.io")
+        @     coursierapi.MavenRepository.of("https://jitpack.io")
         @ )
 
         @ import $ivy.`com.github.vidstige:jadb:v1.0.1`
@@ -339,7 +345,7 @@ object ProjectTests extends TestSuite{
     test("profiles"){
       val testCore =
         """
-            @ import $ivy.`org.apache.spark::spark-sql:1.6.2`
+            @ import $ivy.`org.apache.spark::spark-sql:2.4.3`
 
             @ import scala.collection.JavaConverters._
 
@@ -358,36 +364,34 @@ object ProjectTests extends TestSuite{
             @ )
         """
       test("default"){
-        // should load hadoop 2.2 stuff by default
-        if (scala2_11)
+        // should load hadoop 2.6 stuff by default
+        if (scala2_12)
           check.session(
             s"""
             $testCore
 
             @ val hadoopVersion = p.getProperty("version")
-            hadoopVersion: String = "2.2.0"
+            hadoopVersion: String = "2.6.5"
             """
           )
       }
       test("withProfile"){
-        // with the right profile, should load hadoop 2.6 stuff
-        if (scala2_11)
+        // with the right profile, should load hadoop 3.1 stuff
+        if (scala2_12)
           check.session(
             s"""
             @ interp.resolutionHooks += { fetch =>
             @   fetch.withResolutionParams(
-            @     // With coursier > 1.1.0-M13-1, replace with
-            @     //   fetch.resolutionParams
-            @     //     .addProfile("hadoop-2.6")
-            @     coursier.params.ResolutionParams()
-            @       .withProfiles(Set("hadoop-2.6"))
+            @     fetch
+            @       .getResolutionParams
+            @       .addProfile("hadoop-3.1")
             @   )
             @ }
 
             $testCore
 
             @ val hadoopVersion = p.getProperty("version")
-            hadoopVersion: String = "2.6.0"
+            hadoopVersion: String = "3.1.0"
             """
           )
       }
@@ -411,6 +415,97 @@ object ProjectTests extends TestSuite{
            @ )
            """
       )
+    }
+
+    test("no sources"){
+      val sbv = scala.util.Properties.versionNumberString.split('.').take(2).mkString(".")
+
+      val core =
+        s"""
+            @ import $$ivy.`com.github.alexarchambault::case-app:2.0.0-M9`
+
+            @ val cp = {
+            @   repl.sess
+            @     .frames
+            @     .flatMap(_.classpath)
+            @     .map(_.toString)
+            @ }
+            cp: List[String] = ?
+
+            @ val found = cp.exists(_.endsWith("/case-app_$sbv-2.0.0-M9.jar"))
+            found: Boolean = true
+        """
+
+      test("default"){
+        check.session(
+          s"""
+            $core
+
+            @ val sourcesFound = cp.exists(_.endsWith("/case-app_$sbv-2.0.0-M9-sources.jar"))
+            sourcesFound: Boolean = true
+           """
+        )
+      }
+
+      test("disabled"){
+        check.session(
+          s"""
+            @ interp.resolutionHooks += { fetch =>
+            @   import scala.collection.JavaConverters._
+            @   fetch.withClassifiers(fetch.getClassifiers.asScala.filter(_ != "sources").asJava)
+            @ }
+
+            $core
+
+            @ val sourcesFound = cp.exists(_.endsWith("/case-app_$sbv-2.0.0-M9-sources.jar"))
+            sourcesFound: Boolean = false
+           """
+        )
+      }
+    }
+
+    test("extra artifact types"){
+      val core =
+        """
+            @ import $ivy.`com.almworks.sqlite4java:libsqlite4java-linux-amd64:1.0.392`
+
+            @ val cp = {
+            @   repl.sess
+            @     .frames
+            @     .flatMap(_.classpath)
+            @     .map(_.toString)
+            @ }
+            cp: List[String] = ?
+
+            @ def soFound() = cp.exists(_.endsWith("/libsqlite4java-linux-amd64-1.0.392.so"))
+            defined function soFound
+        """
+
+      test("default"){
+        check.session(
+          s"""
+            $core
+
+            @ val soFound0 = soFound()
+            soFound0: Boolean = false
+           """
+        )
+      }
+
+      test("with so"){
+        check.session(
+          s"""
+            @ interp.resolutionHooks += { fetch =>
+            @   fetch.addArtifactTypes("so")
+            @ }
+
+            $core
+
+            @ val soFound0 = soFound()
+            soFound0: Boolean = true
+           """
+        )
+      }
     }
 
   }

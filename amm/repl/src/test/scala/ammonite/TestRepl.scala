@@ -2,10 +2,13 @@ package ammonite
 
 import java.io.PrintStream
 
-import ammonite.interp.{CodeWrapper, Interpreter, Preprocessor}
+import ammonite.compiler.DefaultCodeWrapper
+import ammonite.compiler.iface.CodeWrapper
+import ammonite.interp.Interpreter
 import ammonite.main.Defaults
 import ammonite.repl._
-import ammonite.runtime.{Frame, History, Storage}
+import ammonite.repl.api.{FrontEnd, History, ReplLoad}
+import ammonite.runtime.{Frame, Storage}
 import ammonite.util.Util.normalizeNewlines
 import ammonite.util._
 import pprint.{TPrint, TPrintColors}
@@ -19,10 +22,10 @@ import ammonite.runtime.ImportHook
  * A test REPL which does not read from stdin or stdout files, but instead lets
  * you feed in lines or sessions programmatically and have it execute them.
  */
-class TestRepl {
+class TestRepl { self =>
   var allOutput = ""
   def predef: (String, Option[os.Path]) = ("", None)
-  def codeWrapper: CodeWrapper = CodeWrapper
+  def codeWrapper: CodeWrapper = DefaultCodeWrapper
 
   val tempDir = os.Path(
     java.nio.file.Files.createTempDirectory("ammonite-tester")
@@ -50,101 +53,35 @@ class TestRepl {
     x => infoBuffer.append(x + Util.newLine)
   )
   val storage = new Storage.Folder(tempDir)
-  val frames = Ref(List(Frame.createInitial()))
+  val initialClassLoader = Thread.currentThread().getContextClassLoader
+  val frames = Ref(List(Frame.createInitial(initialClassLoader)))
   val sess0 = new SessionApiImpl(frames)
 
+  val baseImports = ammonite.main.Defaults.replImports ++ Interpreter.predefImports
+  val basePredefs = Seq(
+    PredefInfo(Name("testPredef"), predef._1, false, predef._2)
+  )
+  val customPredefs = Seq()
+
+  val parser = ammonite.compiler.Parsers
+
   var currentLine = 0
-  val interp: Interpreter = try {
+  val interp = try {
     new Interpreter(
+      ammonite.compiler.CompilerBuilder,
+      parser,
       printer0,
       storage = storage,
       wd = os.pwd,
-      basePredefs = Seq(
-        PredefInfo(
-          Name("defaultPredef"),
-          ammonite.main.Defaults.replPredef + ammonite.main.Defaults.predefString,
-          true,
-          None
-        ),
-        PredefInfo(Name("testPredef"), predef._1, false, predef._2)
-      ),
-      customPredefs = Seq(),
-      extraBridges = Seq(
-        (
-          "ammonite.TestReplBridge",
-          "test",
-          new TestReplApi {
-            def message = "ba"
-          }
-        ),
-        (
-          "ammonite.repl.ReplBridge",
-          "repl",
-          new ReplApiImpl { replApi =>
-            def replArgs0 = Vector.empty[Bind[_]]
-            def printer = printer0
-
-            def sess = sess0
-            val prompt = Ref("@")
-            val frontEnd = Ref[FrontEnd](null)
-            def lastException: Throwable = null
-            def fullHistory = storage.fullHistory()
-            def history = new History(Vector())
-            val colors = Ref(Colors.BlackWhite)
-            def newCompiler() = interp.compilerManager.init(force = true)
-            def compiler = interp.compilerManager.compiler.compiler
-            def interactiveCompiler = interp.compilerManager.pressy.compiler
-            def fullImports = interp.predefImports ++ imports
-            def imports = interp.frameImports
-            def usedEarlierDefinitions = interp.frameUsedEarlierDefinitions
-            def width = 80
-            def height = 80
-
-            object load extends ReplLoad with (String => Unit){
-
-              def apply(line: String) = {
-                interp.processExec(line, currentLine, () => currentLine += 1) match{
-                  case Res.Failure(s) => throw new CompilationError(s)
-                  case Res.Exception(t, s) => throw t
-                  case _ =>
-                }
-              }
-
-              def exec(file: os.Path): Unit = {
-                interp.watch(file)
-                apply(normalizeNewlines(os.read(file)))
-              }
-            }
-
-            override protected[this] def internal0: FullReplAPI.Internal =
-              new FullReplAPI.Internal {
-                def pprinter = replApi.pprinter
-                def colors = replApi.colors
-                def replArgs: IndexedSeq[Bind[_]] = replArgs0
-
-                override def print[T: TPrint](
-                  value: => T,
-                  ident: String,
-                  custom: Option[String]
-                )(implicit
-                  tcolors: TPrintColors,
-                  classTagT: ClassTag[T]
-                ): Iterator[String] =
-                  if (classTagT == scala.reflect.classTag[TestRepl.Nope])
-                    Iterator()
-                  else
-                    super.print(value, ident, custom)(TPrint.implicitly[T], tcolors, classTagT)
-              }
-          }
-        )
-      ),
       colors = Ref(Colors.BlackWhite),
       getFrame = () => frames().head,
       createFrame = () => { val f = sess0.childFrame(frames().head); frames() = f :: frames(); f },
+      initialClassLoader = initialClassLoader,
       replCodeWrapper = codeWrapper,
       scriptCodeWrapper = codeWrapper,
       alreadyLoadedDependencies = Defaults.alreadyLoadedDependencies("amm-test-dependencies.txt"),
-      importHooks = ImportHook.defaults
+      importHooks = ImportHook.defaults,
+      classPathWhitelist = ammonite.repl.Repl.getClassPathWhitelist(thin = true)
     )
 
   }catch{ case e: Throwable =>
@@ -156,8 +93,88 @@ class TestRepl {
     throw e
   }
 
+  val extraBridges = Seq(
+    (
+      "ammonite.TestReplBridge",
+      "test",
+      new TestReplApi {
+        def message = "ba"
+      }
+    ),
+    (
+      "ammonite.repl.ReplBridge",
+      "repl",
+      new ReplApiImpl { replApi =>
+        def replArgs0 = Vector.empty[Bind[_]]
+        def printer = printer0
 
-  for ((error, _) <- interp.initializePredef()) {
+        def sess = sess0
+        val prompt = Ref("@")
+        val frontEnd = Ref[FrontEnd](null)
+        def lastException: Throwable = null
+        def fullHistory = storage.fullHistory()
+        def history = new History(Vector())
+        val colors = Ref(Colors.BlackWhite)
+        def newCompiler() = interp.compilerManager.init(force = true)
+        def fullImports = interp.predefImports ++ imports
+        def imports = frames().head.imports
+        def usedEarlierDefinitions = frames().head.usedEarlierDefinitions
+        def width = 80
+        def height = 80
+
+        object load extends ReplLoad with (String => Unit){
+
+          def apply(line: String) = {
+            interp.processExec(line, currentLine, () => currentLine += 1) match{
+              case Res.Failure(s) => throw new CompilationError(s)
+              case Res.Exception(t, s) => throw t
+              case _ =>
+            }
+          }
+
+          def exec(file: os.Path): Unit = {
+            interp.watch(file)
+            apply(normalizeNewlines(os.read(file)))
+          }
+        }
+
+        override protected[this] def internal0: FullReplAPI.Internal =
+          new FullReplAPI.Internal {
+            def pprinter = replApi.pprinter
+            def colors = replApi.colors
+            def replArgs: IndexedSeq[Bind[_]] = replArgs0
+
+            override def print[T: TPrint](
+              value: => T,
+              ident: String,
+              custom: Option[String]
+            )(implicit
+              tcolors: TPrintColors,
+              classTagT: ClassTag[T]
+            ): Iterator[String] =
+              if (classTagT == scala.reflect.classTag[ammonite.Nope])
+                Iterator()
+              else
+                super.print(value, ident, custom)(TPrint.implicitly[T], tcolors, classTagT)
+          }
+
+        def _compilerManager = interp.compilerManager
+      }
+    ),
+    (
+      "ammonite.repl.api.FrontEndBridge",
+      "frontEnd",
+      new FrontEndAPIImpl {
+        def parser = self.parser
+      }
+    )
+  )
+
+  for {
+    (error, _) <- interp.initializePredef(
+      basePredefs, customPredefs, extraBridges, baseImports
+    )
+  } {
     val (msgOpt, causeOpt) = error match {
       case r: Res.Exception => (Some(r.msg), Some(r.t))
       case r: Res.Failure => (Some(r.msg), None)
@@ -206,7 +223,7 @@ class TestRepl {
       // ...except for the empty 0-line fragment, and the entire fragment,
       // both of which are complete.
       for (incomplete <- commandText.inits.toSeq.drop(1).dropRight(1)){
-        assert(ammonite.interp.Parsers.split(incomplete.mkString(Util.newLine)).isEmpty)
+        assert(ammonite.compiler.Parsers.split(incomplete.mkString(Util.newLine)).isEmpty)
       }
 
       // Finally, actually run the complete command text through the
@@ -311,7 +328,7 @@ class TestRepl {
     warningBuffer.clear()
     errorBuffer.clear()
     infoBuffer.clear()
-    val splitted = ammonite.interp.Parsers.split(input).get.get.value
+    val splitted = ammonite.compiler.Parsers.split(input).get.toOption.get
     val processed = interp.processLine(
       input,
       splitted,
@@ -368,11 +385,5 @@ class TestRepl {
       println("FAILURE TRACE" + Util.newLine + allOutput)
       throw e
     }
-
-}
-
-object TestRepl {
-
-  case class Nope(n: Int)
 
 }

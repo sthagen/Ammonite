@@ -2,11 +2,14 @@ package ammonite.repl
 
 import java.io.{InputStream, InputStreamReader, OutputStream}
 
+import ammonite.repl.api.{FrontEnd, History, ReplLoad}
 import ammonite.runtime._
 import ammonite.terminal.Filter
 import ammonite.util.Util.{newLine, normalizeNewlines}
 import ammonite.util._
-import ammonite.interp.{CodeWrapper, Interpreter, Parsers, Preprocessor}
+import ammonite.compiler.iface.{CodeWrapper, CompilerBuilder, Parser}
+import ammonite.interp.Interpreter
+import coursierapi.Dependency
 
 import scala.annotation.tailrec
 
@@ -14,6 +17,7 @@ class Repl(input: InputStream,
            output: OutputStream,
            error: OutputStream,
            storage: Storage,
+           baseImports: Imports,
            basePredefs: Seq[PredefInfo],
            customPredefs: Seq[PredefInfo],
            wd: os.Path,
@@ -22,16 +26,21 @@ class Repl(input: InputStream,
            initialColors: Colors = Colors.Default,
            replCodeWrapper: CodeWrapper,
            scriptCodeWrapper: CodeWrapper,
-           alreadyLoadedDependencies: Seq[coursier.Dependency],
-           importHooks: Map[Seq[String], ImportHook]) { repl =>
+           alreadyLoadedDependencies: Seq[Dependency],
+           importHooks: Map[Seq[String], ImportHook],
+           compilerBuilder: CompilerBuilder,
+           parser: Parser,
+           initialClassLoader: ClassLoader =
+             classOf[ammonite.repl.api.ReplAPI].getClassLoader,
+           classPathWhitelist: Set[Seq[String]]) { repl =>
 
   val prompt = Ref("@ ")
 
   val frontEnd = Ref[FrontEnd](
     if (scala.util.Properties.isWin)
-      ammonite.repl.FrontEnd.JLineWindows
+      new ammonite.repl.FrontEnds.JLineWindows(parser)
     else
-      AmmoniteFrontEnd(Filter.empty)
+      AmmoniteFrontEnd(parser, Filter.empty)
   )
 
   var lastException: Throwable = null
@@ -48,7 +57,7 @@ class Repl(input: InputStream,
     """
   }.mkString(newLine)
 
-  val frames = Ref(List(Frame.createInitial()))
+  val frames = Ref(List(Frame.createInitial(initialClassLoader)))
 
   /**
     * The current line number of the REPL, used to make sure every snippet
@@ -64,12 +73,26 @@ class Repl(input: InputStream,
 
   def usedEarlierDefinitions = frames().head.usedEarlierDefinitions
 
-  val interp: Interpreter = new Interpreter(
+  val interp = new Interpreter(
+    compilerBuilder,
+    parser,
     printer,
     storage,
-    basePredefs,
-    customPredefs,
-    Seq((
+    wd,
+    colors,
+    verboseOutput = true,
+    getFrame = () => frames().head,
+    createFrame = () => { val f = sess0.childFrame(frames().head); frames() = f :: frames(); f },
+    initialClassLoader = initialClassLoader,
+    replCodeWrapper = replCodeWrapper,
+    scriptCodeWrapper = scriptCodeWrapper,
+    alreadyLoadedDependencies = alreadyLoadedDependencies,
+    importHooks,
+    classPathWhitelist = classPathWhitelist
+  )
+
+  val bridges = Seq(
+    (
       "ammonite.repl.ReplBridge",
       "repl",
       new ReplApiImpl {
@@ -84,8 +107,6 @@ class Repl(input: InputStream,
         def fullHistory = storage.fullHistory()
         def history = repl.history
         def newCompiler() = interp.compilerManager.init(force = true)
-        def compiler = interp.compilerManager.compiler.compiler
-        def interactiveCompiler = interp.compilerManager.pressy.compiler
         def fullImports = repl.fullImports
         def imports = repl.imports
         def usedEarlierDefinitions = repl.usedEarlierDefinitions
@@ -107,20 +128,20 @@ class Repl(input: InputStream,
             apply(normalizeNewlines(os.read(file)))
           }
         }
+
+        def _compilerManager = interp.compilerManager
       }
-    )),
-    wd,
-    colors,
-    verboseOutput = true,
-    getFrame = () => frames().head,
-    createFrame = () => { val f = sess0.childFrame(frames().head); frames() = f :: frames(); f },
-    replCodeWrapper = replCodeWrapper,
-    scriptCodeWrapper = scriptCodeWrapper,
-    alreadyLoadedDependencies = alreadyLoadedDependencies,
-    importHooks
+    ),
+    (
+      "ammonite.repl.api.FrontEndBridge",
+      "frontEnd",
+      new FrontEndAPIImpl {
+        def parser = repl.parser
+      }
+    )
   )
 
-  def initializePredef() = interp.initializePredef()
+  def initializePredef() = interp.initializePredef(basePredefs, customPredefs, bridges, baseImports)
 
   def warmup() = {
     // An arbitrary input, randomized to make sure it doesn't get cached or
@@ -135,7 +156,7 @@ class Repl(input: InputStream,
     // running the user code directly. Could be made longer to better warm more
     // code paths, but then the fixed overhead gets larger so not really worth it
     val code = s"""val array = Seq.tabulate(10)(_*2).toArray.max"""
-    val stmts = Parsers.split(code).get.get.value
+    val stmts = parser.split(code).get.toOption.get
     interp.processLine(code, stmts, 9999999, silent = true, () => () /*donothing*/)
   }
 
@@ -154,6 +175,14 @@ class Repl(input: InputStream,
       case ex => Res.Exception(ex, "")
     }
 
+    _ <- Signaller("INT") {
+      // Put a fake `ThreadDeath` error in `lastException`, because `Thread#stop`
+      // raises an error with the stack trace of *this interrupt thread*, rather
+      // than the stack trace of *the mainThread*
+      lastException = new ThreadDeath()
+      lastException.setStackTrace(Repl.truncateStackTrace(interp.mainThread.getStackTrace))
+      interp.mainThread.stop()
+    }
     (code, stmts) <- frontEnd().action(
       input,
       reader,
@@ -167,14 +196,6 @@ class Repl(input: InputStream,
         history = history :+ code
       }
     )
-    _ <- Signaller("INT") {
-      // Put a fake `ThreadDeath` error in `lastException`, because `Thread#stop`
-      // raises an error with the stack trace of *this interrupt thread*, rather
-      // than the stack trace of *the mainThread*
-      lastException = new ThreadDeath()
-      lastException.setStackTrace(Repl.truncateStackTrace(interp.mainThread.getStackTrace))
-      interp.mainThread.stop()
-    }
     out <- interp.processLine(code, stmts, currentLine, false, () => currentLine += 1)
   } yield {
     printer.outStream.println()
@@ -285,5 +306,15 @@ object Repl{
           .mkString(newLine))
     )
     traces.mkString(newLine)
+  }
+
+  def getClassPathWhitelist(thin: Boolean): Set[Seq[String]] = {
+    if (!thin) Set.empty
+    else {
+      os.read
+        .lines(os.resource / "ammonite-api-whitelist.txt")
+        .map(_.split('/').toSeq)
+        .toSet
+    }
   }
 }

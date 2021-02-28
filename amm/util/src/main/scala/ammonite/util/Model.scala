@@ -31,13 +31,7 @@ class CompilationError(message: String) extends Exception(message)
   * separately, so you can e.g. compare the [[env]] hash even if you don't have
   * the code available
   */
-case class Tag(code: String, env: String){
-  def combined = code + env
-}
-object Tag{
-  implicit def rw: upickle.default.ReadWriter[Tag] = upickle.default.macroRW
-}
-
+case class Tag(code: String, env: String, classPathWhitelistHash: String)
 
 /**
   * Represents a single identifier in Scala source code, e.g. "scala" or
@@ -60,16 +54,6 @@ case class Name(raw: String){
 }
 
 object Name{
-  /**
-    * Read/write [[Name]]s as unboxed strings, in order to save verbosity
-    * in the JSON cache files as well as improving performance of
-    * reading/writing since we read/write [[Name]]s a *lot*.
-    */
-  implicit val nameRW: upickle.default.ReadWriter[Name] =
-    upickle.default.readwriter[String].bimap[Name](
-      name => name.raw,
-      raw => Name(raw)
-  )
 
   val alphaKeywords = Set(
     "abstract", "case", "catch", "class", "def", "do", "else",
@@ -271,15 +255,11 @@ case class Printer(outStream: PrintStream,
 case class ImportTree(prefix: Seq[String],
                       mappings: Option[ImportTree.ImportMapping],
                       start: Int,
-                      end: Int)
-
-object ImportTree{
-  implicit def rw: upickle.default.ReadWriter[ImportTree] = upickle.default.macroRW
-  type ImportMapping = Seq[(String, Option[String])]
+                      end: Int) {
+  lazy val strippedPrefix: Seq[String] =
+    prefix.takeWhile(_(0) == '$').map(_.stripPrefix("$"))
 }
 
-case class PredefFailedToLoad(msg: String,
-                              cause: Option[Throwable],
-                              res: Res.Failing,
-                              watchedFilePaths: Seq[(os.Path, Long)])
-  extends Exception(msg, cause.orNull)
+object ImportTree{
+  type ImportMapping = Seq[(String, Option[String])]
+}

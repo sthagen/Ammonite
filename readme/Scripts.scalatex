@@ -166,7 +166,7 @@
         @p
           If you need more detailed control over what you are importing, e.g.
           with attributes, classifiers or exclusions, you can fall back to
-          using the @hl.scala{interp.load.ivy(deps: coursier.Dependency*)}
+          using the @hl.scala{interp.load.ivy(deps: coursierapi.Dependency*)}
           function.
 
         @hl.ref(scriptTests, Seq("loadIvyAdvanced", "@"), "\"\"\"")
@@ -269,7 +269,7 @@
         them:
 
       @hl.sh
-        $ amm Args.sc --i 3 --s Moo
+        $ amm Args.sc -i 3 -s Moo
         "Hello! MooMooMoo Ammonite."
 
       @p
@@ -377,7 +377,7 @@
 
     @sect{Script Usage Docs}
       @p
-        You can document your scripts with the @hl.scala("@doc") annotation. By
+        You can document your scripts with the @hl.scala("@arg") annotation. By
         default, a script such as
 
       @hl.ref(
@@ -468,7 +468,7 @@
         like the @code{repl.prompt}, @code{repl.history}, and other things
         that only really make sense in the interactive REPL.
 
-      @hl.ref('amm/'interp/'src/'main/'scala/'ammonite/'interp/"InterpAPI.scala", "trait InterpAPI")
+      @hl.ref('amm/"interp"/"api"/'src/'main/'scala/'ammonite/'interp/'api/"InterpAPI.scala", "trait InterpAPI")
 
     @sect{Script Predef}
       @p

@@ -3,9 +3,10 @@ package ammonite.runtime
 import java.nio.file.FileAlreadyExistsException
 import java.nio.file.{Files, Paths}
 
-
+import ammonite.repl.api.History
 import ammonite.util._
 import ammonite.util.Util._
+import coursierapi.{Dependency, Module}
 
 import scala.util.Try
 import scala.collection.mutable
@@ -25,36 +26,96 @@ trait Storage{
 
   def compileCacheSave(path: String, tag: Tag, data: Storage.CompileCache): Unit
   def compileCacheLoad(path: String, tag: Tag): Option[Storage.CompileCache]
-  def classFilesListSave(filePathPrefix: os.RelPath,
+  def classFilesListSave(filePathPrefix: os.SubPath,
                          perBlockMetadata: Seq[ScriptOutput.BlockMetadata],
                          tag: Tag): Unit
-  def classFilesListLoad(filePathPrefix: os.RelPath, tag: Tag): Option[ScriptOutput]
+  def classFilesListLoad(filePathPrefix: os.SubPath, tag: Tag): Option[ScriptOutput]
   def getSessionId: Long
 
-  // Store classpathCache in-memory regardless of Storage impl
-  private var _classpathCache: Option[Vector[java.net.URL]] = None
-  val classpathCache = new StableRef[Option[Vector[java.net.URL]]]{
-    def apply() = _classpathCache
-    def update(value: Option[Vector[java.net.URL]]): Unit = _classpathCache = value
-  }
+  def dirOpt: Option[os.Path] = None
 }
 
 object Storage{
   case class CompileCache(classFiles: Vector[(String, Array[Byte])], imports: Imports)
-  type IvyMap = Map[(String, Seq[coursier.Dependency]), Set[String]]
-  implicit def orgRW: upickle.default.ReadWriter[coursier.core.Organization] =
-    implicitly[upickle.default.ReadWriter[String]].bimap(_.value, coursier.core.Organization(_))
-  implicit def modNameRW: upickle.default.ReadWriter[coursier.core.ModuleName] =
-    implicitly[upickle.default.ReadWriter[String]].bimap(_.value, coursier.core.ModuleName(_))
-  implicit def configRW: upickle.default.ReadWriter[coursier.core.Configuration] =
-    implicitly[upickle.default.ReadWriter[String]].bimap(_.value, coursier.core.Configuration(_))
-  implicit def typeRW: upickle.default.ReadWriter[coursier.core.Type] =
-    implicitly[upickle.default.ReadWriter[String]].bimap(_.value, coursier.core.Type(_))
-  implicit def classifierRW: upickle.default.ReadWriter[coursier.core.Classifier] =
-    implicitly[upickle.default.ReadWriter[String]].bimap(_.value, coursier.core.Classifier(_))
-  implicit def depRW: upickle.default.ReadWriter[coursier.Dependency] = upickle.default.macroRW
-  implicit def modRW: upickle.default.ReadWriter[coursier.Module] = upickle.default.macroRW
-  implicit def attrRW: upickle.default.ReadWriter[coursier.Attributes] = upickle.default.macroRW
+  type IvyMap = Map[(String, Seq[Dependency]), Seq[String]]
+
+  private final case class DependencyLike(
+    module: DependencyLike.ModuleLike,
+    version: String,
+    exclusions: Set[(String, String)],
+    configuration: String,
+    `type`: String,
+    classifier: String,
+    transitive: Boolean
+  ) {
+    def dependency: Dependency = {
+      val dep = Dependency.of(module.module, version)
+        .withConfiguration(configuration)
+        .withType(`type`)
+        .withClassifier(classifier)
+        .withTransitive(transitive)
+      for ((o, n) <- exclusions)
+        dep.addExclusion(o, n)
+      dep
+    }
+  }
+  private object DependencyLike {
+    import scala.collection.JavaConverters._
+    final case class ModuleLike(org: String, name: String, attributes: Map[String, String]) {
+      def module: Module =
+        Module.of(org, name, attributes.asJava)
+    }
+    def apply(dependency: Dependency): DependencyLike =
+      DependencyLike(
+        ModuleLike(
+          dependency.getModule.getOrganization,
+          dependency.getModule.getName,
+          dependency.getModule.getAttributes.asScala.toMap
+        ),
+        dependency.getVersion,
+        dependency.getExclusions.asScala.map(e => (e.getKey, e.getValue)).toSet,
+        dependency.getConfiguration,
+        dependency.getType,
+        dependency.getClassifier,
+        dependency.isTransitive
+      )
+  }
+
+  implicit def depRW: upickle.default.ReadWriter[Dependency] = {
+    implicit def moduleLike: upickle.default.ReadWriter[DependencyLike.ModuleLike] =
+      upickle.default.macroRW
+    def helper: upickle.default.ReadWriter[DependencyLike] = upickle.default.macroRW
+    helper.bimap(DependencyLike.apply(_), _.dependency)
+  }
+  implicit def tagRW: upickle.default.ReadWriter[Tag] = upickle.default.macroRW
+  /**
+    * Read/write [[Name]]s as unboxed strings, in order to save verbosity
+    * in the JSON cache files as well as improving performance of
+    * reading/writing since we read/write [[Name]]s a *lot*.
+    */
+  implicit val nameRW: upickle.default.ReadWriter[Name] =
+    upickle.default.readwriter[String].bimap[Name](
+      name => name.raw,
+      raw => Name(raw)
+  )
+  implicit def importTreeRW: upickle.default.ReadWriter[ImportTree] = upickle.default.macroRW
+  implicit def versionedWrapperIdRW: upickle.default.ReadWriter[VersionedWrapperId] =
+    upickle.default.macroRW
+  implicit def blockMetadataRW: upickle.default.ReadWriter[ScriptOutput.BlockMetadata] =
+    upickle.default.macroRW
+  implicit def metadataRW: upickle.default.ReadWriter[ScriptOutput.Metadata] =
+    upickle.default.macroRW
+  implicit def importHookInfoRW: upickle.default.ReadWriter[ImportHookInfo] =
+    upickle.default.macroRW
+  implicit val importDataRW: upickle.default.ReadWriter[ImportData] = upickle.default.macroRW
+  implicit val importTypeRW: upickle.default.ReadWriter[ImportData.ImportType] =
+    upickle.default.macroRW
+  implicit val importsRW: upickle.default.ReadWriter[Imports] =
+    upickle.default.readwriter[Seq[ImportData]].bimap[Imports](
+      imports => imports.value,
+      data => Imports(data)
+  )
+
   private def loadIfTagMatches(loadedTag: Tag,
                                cacheTag: Tag,
                                classFilesList: Seq[ScriptOutput.BlockMetadata],
@@ -101,14 +162,14 @@ object Storage{
       } yield data
     }
 
-    def classFilesListSave(filePathPrefix: os.RelPath,
+    def classFilesListSave(filePathPrefix: os.SubPath,
                            perBlockMetadata: Seq[ScriptOutput.BlockMetadata],
                            tag: Tag): Unit = {
 
       classFilesListcache(filePathPrefix.toString) = (tag, perBlockMetadata)
     }
 
-    def classFilesListLoad(filePathPrefix: os.RelPath,
+    def classFilesListLoad(filePathPrefix: os.SubPath,
                            cacheTag: Tag): Option[ScriptOutput] = {
 
       classFilesListcache.get(filePathPrefix.toString) match{
@@ -154,22 +215,28 @@ object Storage{
       }
 
       def update(t: History): Unit = {
-        os.write.over(historyFile, upickle.default.write(t.toVector, indent = 4))
+        os.write.over(
+          historyFile,
+          upickle.default.stream(t.toVector, indent = 4),
+          createFolders = true
+        )
       }
     }
 
 
-    def classFilesListSave(filePathPrefix: os.RelPath,
+    def classFilesListSave(filePathPrefix: os.SubPath,
                            perBlockMetadata: Seq[ScriptOutput.BlockMetadata],
                            tag: Tag): Unit = {
 
-      val codeCacheDir = cacheDir/'scriptCaches/filePathPrefix/tag.code/tag.env
+      val codeCacheDir =
+        cacheDir/'scriptCaches/filePathPrefix/tag.code/tag.env/tag.classPathWhitelistHash
 
       os.makeDir.all(codeCacheDir)
       try {
         os.write.over(
           codeCacheDir/classFilesOrder,
-          upickle.default.write((tag, perBlockMetadata), indent = 4)
+          upickle.default.stream((tag, perBlockMetadata), indent = 4),
+          createFolders = true
         )
       } catch {
         case _: FileAlreadyExistsException => // ignore
@@ -186,10 +253,11 @@ object Storage{
       catch{ case e: Throwable => None }
     }
 
-    def classFilesListLoad(filePathPrefix: os.RelPath,
+    def classFilesListLoad(filePathPrefix: os.SubPath,
                            tag: Tag): Option[ScriptOutput] = {
 
-      val codeCacheDir = cacheDir/'scriptCaches/filePathPrefix/tag.code/tag.env
+      val codeCacheDir =
+        cacheDir/'scriptCaches/filePathPrefix/tag.code/tag.env/tag.classPathWhitelistHash
 
       if(!os.exists(codeCacheDir)) None
       else {
@@ -210,19 +278,26 @@ object Storage{
     }
 
     def compileCacheSave(path: String, tag: Tag, data: CompileCache): Unit = {
-      val tagCacheDir = compileCacheDir/path.split('.').map(encode)/tag.code/tag.env
+      val tagCacheDir = {
+        compileCacheDir/path.split('.').map(encode)/tag.code/tag.env/tag.classPathWhitelistHash
+      }
 
       os.makeDir.all(tagCacheDir)
-      val metadata = upickle.default.write((tag, data.imports), indent = 4)
-      os.write.over(tagCacheDir/metadataFile, metadata)
+      os.write.over(
+        tagCacheDir/metadataFile,
+        upickle.default.stream((tag, data.imports), indent = 4),
+          createFolders = true
+      )
       data.classFiles.foreach{ case (name, bytes) =>
-        os.write.over(tagCacheDir/s"$name.class", bytes)
+        os.write.over(tagCacheDir/s"$name.class", bytes, createFolders = true)
       }
 
     }
 
     def compileCacheLoad(path: String, tag: Tag): Option[CompileCache] = {
-      val tagCacheDir = compileCacheDir/path.split('.').map(encode)/tag.code/tag.env
+      val tagCacheDir = {
+        compileCacheDir/path.split('.').map(encode)/tag.code/tag.env/tag.classPathWhitelistHash
+      }
       if(!os.exists(tagCacheDir)) None
       else for{
         (loadedTag, metadata) <- readJson[(Tag, Imports)](tagCacheDir/metadataFile)
@@ -258,7 +333,7 @@ object Storage{
         map.filter(_._2.forall(str => Files.exists(Paths.get(str)))).asInstanceOf[IvyMap]
       }
       def update(map: IvyMap) = {
-        os.write.over(ivyCacheFile, upickle.default.write(map, indent = 4))
+        os.write.over(ivyCacheFile, upickle.default.stream(map, indent = 4), createFolders = true)
       }
     }
 
@@ -266,5 +341,7 @@ object Storage{
       try Some((os.read(predef), predef))
       catch { case e: java.nio.file.NoSuchFileException => Some(("", predef))}
     }
+
+    override def dirOpt: Option[os.Path] = Some(dir)
   }
 }

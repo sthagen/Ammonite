@@ -14,31 +14,31 @@ object SessionTests extends TestSuite{
 
   val tests = Tests{
     val check = new TestRepl()
-    test("workingDir"){
-      check.session(s"""
-        @ import ammonite.ops._
-
-        @ interp.load.module($bareSrc)
-
-        @ val originalWd = wd
-
-        @ val originalLs1 = %%ls
-
-        @ val originalLs2 = ls!
-
-        @ cd! up
-
-        @ assert(wd == originalWd/up)
-
-        @ cd! root
-
-        @ assert(wd == root)
-
-        @ assert(originalLs1 != (%%ls))
-
-        @ assert(originalLs2 != (ls!))
-      """)
-    }
+//    test("workingDir"){
+//      check.session(s"""
+//        @ import ammonite.ops._
+//
+//        @ interp.load.module($bareSrc)
+//
+//        @ val originalWd = wd
+//
+//        @ val originalLs1 = %%ls
+//
+//        @ val originalLs2 = ls!
+//
+//        @ cd! up
+//
+//        @ assert(wd == originalWd/up)
+//
+//        @ cd! root
+//
+//        @ assert(wd == root)
+//
+//        @ assert(originalLs1 != (%%ls))
+//
+//        @ assert(originalLs2 != (ls!))
+//      """)
+//    }
     test("specialPPrint"){
       // Make sure these various "special" data structures get pretty-printed
       // correctly, i.e. not as their underlying type but as something more
@@ -185,9 +185,9 @@ object SessionTests extends TestSuite{
 
         @ assert(!stat('test132).isDir && !stat('test132).isSymLink && stat('test130).isDir)
 
-        @ assert(!stat.full('test132).isDir && !stat.full('test132).isSymLink)
+        @ assert(!stat('test132).isDir && !stat('test132).isSymLink)
 
-        @ assert(stat.full('test130).isDir)
+        @ assert(stat('test130).isDir)
 
         @ assert(ls.rec(wd).length == 5)
 
@@ -217,11 +217,11 @@ object SessionTests extends TestSuite{
 
         @ assert(!stat(t/'test132).isDir && !stat(t/'test132).isSymLink)
 
-        @ assert(!stat.full(t/'test132).isDir && !stat.full(t/'test132).isSymLink)
+        @ assert(!stat(t/'test132).isDir && !stat(t/'test132).isSymLink)
 
         @ assert(stat(t/'test130).isDir && stat(t, followLinks = false).isSymLink)
 
-        @ assert(stat.full(t/'test130).isDir && stat.full(t, followLinks = false).isSymLink)
+        @ assert(stat(t/'test130).isDir && stat(t, followLinks = false).isSymLink)
 
         @ rm! tmpdir
       """)

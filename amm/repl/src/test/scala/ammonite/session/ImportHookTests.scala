@@ -2,7 +2,7 @@ package ammonite.session
 
 import ammonite.DualTestRepl
 import ammonite.TestUtils._
-import ammonite.runtime.tools.IvyThing
+import ammonite.interp.api.IvyConstructor
 import utest._
 
 import scala.collection.{immutable => imm}
@@ -89,7 +89,7 @@ object ImportHookTests extends TestSuite{
             @ import scalatags.Text.all._
             error: not found: value scalatags
 
-            @ import $$ivy.`com.lihaoyi:scalatags_${IvyThing.scalaBinaryVersion}:0.7.0`
+            @ import $$ivy.`com.lihaoyi:scalatags_${IvyConstructor.scalaBinaryVersion}:0.7.0`
 
             @ import scalatags.Text.all._
 
@@ -112,15 +112,17 @@ object ImportHookTests extends TestSuite{
 
         test("inlineFull"){
           // no more macroparadise in 2.13
-          if (scala2_11 || scala2_12) check.session("""
+          if (scala2_12 && scala.util.Properties.versionNumberString != "2.12.10") {
+            check.session("""
             @ import org.scalamacros.paradise.Settings._
             error: object scalamacros is not a member of package org
 
-            @ import $ivy.`org.scalamacros:::paradise:2.1.0`, org.scalamacros.paradise.Settings._
+            @ import $ivy.`org.scalamacros:::paradise:2.1.1`, org.scalamacros.paradise.Settings._
 
             @ boolSetting("key").value
             res1: Boolean = false
            """)
+          }
         }
       }
       test("url"){

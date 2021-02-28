@@ -18,6 +18,17 @@ project lives:
 - [Ammonite-Shell](https://lihaoyi.github.io/Ammonite/#Ammonite-Shell), the 
   Bash-replacement system shell
 
+
+If you use Ammonite and like it, you will probably enjoy the following book by the Author:
+
+- [*Hands-on Scala Programming*](https://www.handsonscala.com/)
+
+*Hands-on Scala* has uses Ammonite extensively throughout the book, using
+Ammonite to accomplish a lot of useful tasks: exploring third party libraries or
+writing parallel web-crawlers in the REPL, and implementing entire programming
+languages in Ammonite Scala Scripts. *Hands-on Scala* is a great way to level 
+up your skills in Scala in general and Ammonite in particular.
+
 If you want to learn more about Ammonite or how to use it, check out the links 
 above, or ask on the [Gitter Channel](https://gitter.im/lihaoyi/Ammonite). The 
 remainder of this document is developer-docs for people who want to work on the 
@@ -66,9 +77,9 @@ Although most features should be unit tested, it's still useful to fire up a REP
   lets you test all terminal interactions without all the complexity of the
   Scala compiler, classloaders, etc. that comes in `repl/`
   
-- `mill -i -w amm[2.12.6].test.run` brings up the Ammonite-REPL using the source
-  code in the repository, and automatically restarts it on-exit if you have made
-  a change to the code. Useful for manual testing both of `amm/` as well as
+- `mill -i -w amm[2.12.6].run` brings up the Ammonite-REPL using the source code
+  in the repository, and automatically restarts it on-exit if you have made a
+  change to the code. Useful for manual testing both of `amm/` as well as
   `ops/`, since you can just `import ammonite.ops._` and start using them. Note
   that this does not bring in filesystem utilities like the `wd` variable, `cd!`
   command. You can also pass in the path to a `.sc` file to run it using
@@ -153,3 +164,4 @@ And possibly:
 - **It's entirely possible your changes won't be merged**, or will get ripped out later. This is also the case for my changes, as the Author!
 - **Even a rejected/reverted PR is valuable**! It helps to explore the solution space, and know what works and what doesn't. For every line in the repo, at least three lines were tried, committed, and reverted/refactored, and more than 10 were tried without committing.
 - **Feel free to send Proof-Of-Concept PRs** that you don't intend to get merged.
+

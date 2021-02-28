@@ -2,7 +2,7 @@ package ammonite.session
 
 import ammonite.TestUtils._
 import ammonite.DualTestRepl
-import ammonite.util.{Res, Util}
+import ammonite.util.Res
 import utest._
 
 
@@ -30,18 +30,19 @@ object AdvancedTests extends TestSuite{
         defined class Foo
 
         @ Foo(1, "", Nil)
-        res2: Foo = Foo(1, "", List())
+        res2: Foo = ${Print.Foo(i = "1", s0 = "\"\"", s1 = "List()")}
 
         @ Foo(
         @   1234567,
         @   "I am a cow, hear me moo",
         @   Seq("I weigh twice as much as you", "and I look good on the barbecue")
         @ )
-        res3: Foo = Foo(
-          1234567,
-          "I am a cow, hear me moo",
-          List("I weigh twice as much as you", "and I look good on the barbecue")
-        )
+        res3: Foo = ${Print.Foo(
+          i = 1234567,
+          s0 = "\"I am a cow, hear me moo\"",
+          s1 = "List(\"I weigh twice as much as you\", \"and I look good on the barbecue\")",
+          indent = "        "
+        )}
       """)
     }
 
@@ -153,7 +154,7 @@ object AdvancedTests extends TestSuite{
     }
     test("trappedType"){
       check.session("""
-        @ val nope = ammonite.TestRepl.Nope(2); val n = 2
+        @ val nope = ammonite.Nope(2); val n = 2
         n: Int = 2
       """)
     }
@@ -340,23 +341,39 @@ object AdvancedTests extends TestSuite{
         @ assert(repl.prompt() == "B")
       """)
     }
-    test("macroParadiseWorks"){
-      // no more macroparadise in 2.13
-      if (scala2_11 || scala2_12) {
-        val scalaVersion: String = scala.util.Properties.versionNumberString
-        val c1: DualTestRepl = new DualTestRepl()
-        c1.session(s"""
-          @ interp.load.plugin.ivy("org.scalamacros" % "paradise_${scalaVersion}" % "2.1.0")
-        """)
-        c1.session("""
-          @ val x = 1
-        """)
-      }
+    test("macro paradise or -Ymacro-annotations") {
+      val init =
+        if (scala2_12) {
+          val scalaVer = scala.util.Properties.versionNumberString
+          val paradiseVersion =
+            if (scalaVer == "2.12.0" || scalaVer == "2.12.1") "2.1.0"
+            else "2.1.1"
+          s"""import $$plugin.$$ivy.`org.scalamacros:::paradise:$paradiseVersion`"""
+        }
+        else
+          "interp.configureCompiler(_.settings.YmacroAnnotations.value = true)"
+      check.session(s"""
+        @ $init
+
+        @ import $$ivy.`io.github.alexarchambault::data-class:0.2.3`
+
+        @ import dataclass._
+        import dataclass._
+
+        @ @data class Foo(n: Int = 0)
+
+        @ val foo = Foo()
+        foo: Foo = ${Print.Foo(n = 0)}
+
+        @ val foo2 = foo.withN(3)
+        foo2: Foo = ${Print.Foo(n = 3)}
+
+      """)
     }
     test("desugar"){
       check.session("""
         @ desugar{1 + 2 max 3}
-        res0: Desugared = scala.Predef.intWrapper(3).max(3)
+        res0: compiler.tools.Desugared = scala.Predef.intWrapper(3).max(3)
       """)
     }
     test("loadingModulesInPredef"){
@@ -483,14 +500,15 @@ object AdvancedTests extends TestSuite{
           sv
       }
       val url = "https://repo1.maven.org/maven2/" +
-        s"io/argonaut/argonaut_$sbv/6.2.3/argonaut_$sbv-6.2.3.jar"
+        s"org/scalacheck/scalacheck_$sbv/1.14.0/scalacheck_$sbv-1.14.0.jar"
       check.session(s"""
         @ interp.load.cp(new java.net.URL("$url"))
 
-        @ import argonaut._, Argonaut._
+        @ import org.scalacheck.Gen
+        import org.scalacheck.Gen
 
-        @ val json = Json.obj("a" -> Json.jBool(false)).nospaces
-        json: String = "{\\"a\\":false}"
+        @ val check = Gen.choose(1, 5).sample.exists(_ <= 5)
+        check: Boolean = true
       """)
     }
 
@@ -517,6 +535,29 @@ object AdvancedTests extends TestSuite{
         t: String = ?
 
         @ assert(t.endsWith(".List"))
+      """)
+    }
+
+    test("accessInMemoryClassMap"){
+      check.session("""
+        @ class Foo
+        defined class Foo
+
+        @ val classes = {
+        @   implicitly[ammonite.repl.api.ReplAPI]
+        @     .sess
+        @     .frames
+        @     .head
+        @     .classloader
+        @     .inMemoryClasses
+        @ }
+        classes: Map[String, Array[Byte]] = ?
+
+        @ val name = classOf[Foo].getName
+        name: String = ?
+
+        @ val found = classes.contains(name)
+        found: Boolean = true
       """)
     }
   }
